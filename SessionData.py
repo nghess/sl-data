@@ -1,8 +1,10 @@
 """
-SessionData class for storing and manipulating Kilosort neural data.
+SessionData class for storing and manipulating neural and behavioral data.
 
 This module provides a standalone class to encapsulate neural data from a single recording session,
-including spike times, cluster information, and population activity analysis tools.
+including spike times, cluster information, and simple population activity binning tools.
+
+Code by Nate Gonzales-Hess, August 2025.
 """
 
 import numpy as np
@@ -11,14 +13,13 @@ from pathlib import Path
 from typing import Optional, Dict, Tuple, Union, List
 from scipy.stats import zscore
 import os
+import operator
+import copy
 
 
 class SessionData:
     """
-    A class to store and manipulate Kilosort data for a single recording session.
-    
-    This class loads neural data from Kilosort output files and provides methods
-    for analyzing population activity patterns across time.
+    A class to store and filter Kilosort and Bonsai data for a single recording session.
     
     Attributes:
     -----------
@@ -27,15 +28,21 @@ class SessionData:
     session_id : str  
         Session identifier
     clusters : dict
-        Dictionary containing cluster information with keys:
-        - cluster_id: dict with 'best_channel', 'spike_times', 'waveform_template'
+        Dictionary with sequential indices (0, 1, 2, ...) as keys, each containing:
+        - 'cluster_id': original Kilosort cluster ID
+        - 'best_channel': channel with maximum waveform amplitude
+        - 'spike_times': spike times in milliseconds
+        - 'waveform_template': mean waveform template
+        - 'n_spikes': number of spikes
     sampling_rate : float
         Neural data sampling rate in Hz
     n_clusters : int
-        Number of clusters loaded
+        Number of clusters loaded (after filtering)
+    sniff : np.ndarray
+        Sniff signal data (if available)
     """
     
-    def __init__(self, mouse_id: str, session_id: str, base_path: str = "S:\\", 
+    def __init__(self, mouse_id: str, session_id: str, experiment: str, base_path: str = "S:\\", 
                  sampling_rate: float = 30000.0, min_spikes: int = 50,
                  verbose: bool = True):
         """
@@ -58,6 +65,7 @@ class SessionData:
         """
         self.mouse_id = mouse_id
         self.session_id = session_id
+        self.experiment = experiment
         self.base_path = base_path
         self.sampling_rate = sampling_rate
         self.min_spikes = min_spikes
@@ -67,34 +75,83 @@ class SessionData:
         self.clusters = {}
         self.raw_data = {}
         self.n_clusters = 0
-        
+        self.events = pd.DataFrame()
+
+        # Initialize signal traces
+        self.sniff = np.array([])
+        self.iti = np.array([])
+        self.reward = np.array([])
+
         # Load the data
         self._load_kilosort_data()
+        self._load_events_data()
         self._process_clusters()
+        self._process_signals()
         
         if verbose:
             print(f"Loaded {self.n_clusters} clusters for {mouse_id}_{session_id}")
+            if len(self.sniff) > 0:
+                print(f"Loaded sniff data: {len(self.sniff)} samples")
     
+    def _get_file_path(self, target_filename: str) -> Optional[Path]:
+        """
+        Find the path to a target file by searching flexibly within the experiment directory.
+        
+        Parameters:
+        -----------
+        target_filename : str
+            Target filename to search for (e.g., 'sniff.npy', 'spike_times.npy')
+            
+        Returns:
+        --------
+        file_path : Path or None
+            Path to the target file, or None if not found
+        """
+        # Search from experiment directory
+        search_dir = Path(self.base_path) / self.experiment
+        
+        if not search_dir.exists():
+            if self.verbose:
+                print(f"Experiment directory does not exist: {search_dir}")
+            return None
+        
+        # Search for the target file within the experiment directory
+        search_pattern = f"**/{target_filename}"
+        matching_files = list(search_dir.glob(search_pattern))
+        
+        # Filter for files that have mouse_id/session_id in their path
+        # Use Path.parts to avoid OS-specific separator issues
+        for file_path in matching_files:
+            path_parts = file_path.parts
+            # Check if both mouse_id and session_id appear in the path parts
+            if self.mouse_id in path_parts and self.session_id in path_parts:
+                return file_path
+        
+        if self.verbose:
+            print(f"Warning: {target_filename} not found for {self.mouse_id}/{self.session_id} in {search_dir}")
+        return None
+
     def _load_kilosort_data(self):
         """Load raw Kilosort data files."""
         try:
             self.raw_data = self._load_kilosort_files(
                 self.mouse_id, 
-                self.session_id, 
+                self.session_id,
+                self.experiment, 
                 base_path=self.base_path,
-                files_needed=['spike_times', 'spike_templates', 'templates']
+                files_needed=['spike_times', 'spike_templates', 'templates', 'sniff']
             )
             
             if self.verbose:
-                print(f"Loaded Kilosort data: {list(self.raw_data.keys())}")
+                print(f"Loaded data: {list(self.raw_data.keys())}")
                 
         except Exception as e:
             raise ValueError(f"Failed to load Kilosort data: {e}")
     
-    def _load_kilosort_files(self, mouse_id: str, session_id: str, base_path: str = "S:\\", 
+    def _load_kilosort_files(self, mouse_id: str, session_id: str, experiment: str, base_path: str = "S:\\", 
                             files_needed: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
         """
-        Load kilosort spike sorting data for a given mouse and session.
+        Load kilosort spike sorting data for a given mouse and session using flexible path finding.
         
         Parameters:
         -----------
@@ -102,79 +159,72 @@ class SessionData:
             Mouse identifier (e.g., '7001')
         session_id : str
             Session identifier (e.g., 'v1')
+        experiment : str
+            Experiment name
         base_path : str
             Base data directory path (default: 'S:\\')
         files_needed : list of str, optional
             Specific files to load. If None, loads all standard files.
             Options: ['spike_times', 'spike_templates', 'templates', 'amplitudes', 
-                     'whitening_mat_inv']
+                     'whitening_mat_inv', 'sniff']
             
         Returns:
         --------
         data : dict
             Dictionary containing loaded data arrays/dataframes
         """
-        # Handle different base_path formats
-        if "kilosorted" in base_path:
-            kilosort_path = Path(base_path) / mouse_id / session_id
-        else:
-            kilosort_path = Path(base_path) / "clickbait-visual" / "kilosorted" / mouse_id / session_id
-        
         # Default files to load
         if files_needed is None:
             files_needed = ['spike_times', 'spike_templates', 'templates', 'amplitudes', 
-                           'whitening_mat_inv']
+                           'whitening_mat_inv', 'sniff']
         
         data = {}
         
-        # Load numpy files
-        numpy_files = {
+        # Define filename mapping
+        target_files = {
             'spike_times': 'spike_times.npy',
             'spike_templates': 'spike_templates.npy', 
             'templates': 'templates.npy',
             'amplitudes': 'amplitudes.npy',
-            'whitening_mat_inv': 'whitening_mat_inv.npy'
+            'whitening_mat_inv': 'whitening_mat_inv.npy',
+            'sniff': 'sniff.npy'
         }
         
+        # Load each requested file using flexible path finding
         for key in files_needed:
-            if key in numpy_files:
-                file_path = kilosort_path / numpy_files[key]
-                if file_path.exists():
-                    data[key] = np.load(file_path)
-                elif self.verbose:
-                    print(f"Warning: {file_path} not found")
-        
+            if key in target_files:
+                target_filename = target_files[key]
+                file_path = self._get_file_path(target_filename)
+                
+                if file_path is not None:
+                    try:
+                        data[key] = np.load(file_path)
+                        if self.verbose:
+                            print(f"Successfully loaded {key} from {file_path}")
+                    except Exception as e:
+                        if self.verbose:
+                            print(f"Error loading {key} from {file_path}: {e}")
+                else:
+                    if self.verbose:
+                        print(f"Warning: {target_filename} not found")
         
         return data
-    
-    def _load_events_data(self, mouse_id: str, session_id: str, base_path: str = "S:\\") -> pd.DataFrame:
+
+    def _load_events_data(self) -> pd.DataFrame:
         """
-        Load behavioral events data for a given mouse and session.
-        
-        Parameters:
-        -----------
-        mouse_id : str
-            Mouse identifier (e.g., '7001')
-        session_id : str
-            Session identifier (e.g., 'v1')
-        base_path : str
-            Base data directory path (default: 'S:\\')
-            
+        Load behavioral events data for a given mouse and session using flexible path finding.
+
         Returns:
         --------
         events : pd.DataFrame
-            Events dataframe with behavioral data
+            Events dataframe with behavioral data from Bonsai
         """
-        # Handle different base_path formats
-        if "events" in base_path:
-            events_path = Path(base_path) / mouse_id / session_id / "events.csv"
-        else:
-            events_path = Path(base_path) / "clickbait-visual" / "events" / mouse_id / session_id / "events.csv"
+        events_path = self._get_file_path("events.csv")
         
-        if not events_path.exists():
-            raise FileNotFoundError(f"Events file not found: {events_path}")
+        if events_path is None:
+            raise FileNotFoundError(f"Events file (events.csv) not found for {self.mouse_id}_{self.session_id}")
         
-        return pd.read_csv(events_path)
+        self.events = pd.read_csv(events_path)
     
     def _get_cluster_spike_times(self, spike_times: np.ndarray, spike_templates: np.ndarray, 
                                 cluster_id: int, position_times: Optional[np.ndarray] = None,
@@ -217,41 +267,6 @@ class SessionData:
         
         return cluster_spike_times
     
-    def _get_session_directories(self, mouse_id: str, base_path: str = "S:\\") -> List[str]:
-        """
-        Get sorted list of session directories for a mouse.
-        
-        Parameters:
-        -----------
-        mouse_id : str
-            Mouse identifier (e.g., '7001')
-        base_path : str
-            Base data directory path
-            
-        Returns:
-        --------
-        session_dirs : list of str
-            Sorted list of session directory names
-        """
-        # Handle different base_path formats
-        if "kilosorted" in base_path:
-            kilosort_mouse_path = Path(base_path) / mouse_id
-        else:
-            kilosort_mouse_path = Path(base_path) / "clickbait-visual" / "kilosorted" / mouse_id
-        
-        if not kilosort_mouse_path.exists():
-            return []
-        
-        # Get directories and sort numerically by session number
-        session_dirs = [d for d in os.listdir(kilosort_mouse_path) 
-                       if os.path.isdir(kilosort_mouse_path / d)]
-        
-        # Extract numeric part and sort
-        session_numbers = [int(''.join(filter(str.isdigit, d))) for d in session_dirs]
-        sorted_indices = np.argsort(session_numbers)
-        
-        return [session_dirs[i] for i in sorted_indices]
-    
     def _process_clusters(self):
         """Process clusters and extract relevant information."""
         if 'spike_times' not in self.raw_data or 'spike_templates' not in self.raw_data:
@@ -263,6 +278,9 @@ class SessionData:
         
         # Get unique cluster IDs
         unique_clusters = np.unique(spike_templates)
+        
+        # Collect valid clusters first (those meeting min_spikes threshold)
+        valid_clusters = []
         
         for cluster_id in unique_clusters:
             # Get spike times for this cluster using internal method
@@ -286,47 +304,76 @@ class SessionData:
                 # Extract waveform for best channel
                 waveform_template = template[:, best_channel]
             
-            # Store cluster information
-            self.clusters[int(cluster_id)] = {
+            # Store cluster information with original cluster_id
+            cluster_info = {
+                'cluster_id': int(cluster_id),  # Original cluster ID from Kilosort
                 'best_channel': best_channel,
                 'spike_times': cluster_spike_times,
                 'waveform_template': waveform_template,
                 'n_spikes': len(cluster_spike_times)
             }
+            
+            valid_clusters.append(cluster_info)
+        
+        # Now store clusters with sequential indices (no gaps)
+        self.clusters = {}
+        for i, cluster_info in enumerate(valid_clusters):
+            self.clusters[i] = cluster_info
         
         self.n_clusters = len(self.clusters)
     
+    def _process_signals(self):
+        """Process signal traces (sniff, etc.)."""
+        # Load sniff data if available
+        if 'sniff' in self.raw_data:
+            self.sniff = self.raw_data['sniff']
+        else:
+            self.sniff = np.array([])
+            if self.verbose:
+                print("No sniff data found")
+    
     def get_cluster_ids(self) -> list:
         """
-        Get list of cluster IDs.
+        Get list of cluster indices (sequential 0-based indices).
         
         Returns:
         --------
-        cluster_ids : list
-            List of cluster IDs
+        cluster_indices : list
+            List of cluster indices (0, 1, 2, ...)
         """
         return list(self.clusters.keys())
     
-    def get_cluster_info(self, cluster_id: int) -> Dict:
+    def get_original_cluster_ids(self) -> list:
+        """
+        Get list of original Kilosort cluster IDs.
+        
+        Returns:
+        --------
+        original_cluster_ids : list
+            List of original cluster IDs from Kilosort data
+        """
+        return [cluster_info['cluster_id'] for cluster_info in self.clusters.values()]
+    
+    def get_cluster_info(self, cluster_index: int) -> Dict:
         """
         Get information for a specific cluster.
         
         Parameters:
         -----------
-        cluster_id : int
-            Cluster ID
+        cluster_index : int
+            Cluster index (0-based sequential index, not original Kilosort ID)
             
         Returns:
         --------
         cluster_info : dict
             Dictionary with cluster information
         """
-        if cluster_id not in self.clusters:
-            raise ValueError(f"Cluster {cluster_id} not found")
+        if cluster_index not in self.clusters:
+            raise ValueError(f"Cluster index {cluster_index} not found")
         
-        return self.clusters[cluster_id].copy()
+        return self.clusters[cluster_index].copy()
     
-    def get_spike_times(self, cluster_id: int, 
+    def get_spike_times(self, cluster_index: int, 
                        start_time: float = 0, 
                        end_time: float = np.inf) -> np.ndarray:
         """
@@ -334,8 +381,8 @@ class SessionData:
         
         Parameters:
         -----------
-        cluster_id : int
-            Cluster ID
+        cluster_index : int
+            Cluster index (0-based sequential index, not original Kilosort ID)
         start_time : float
             Start time in milliseconds
         end_time : float
@@ -346,10 +393,10 @@ class SessionData:
         spike_times : np.ndarray
             Filtered spike times
         """
-        if cluster_id not in self.clusters:
-            raise ValueError(f"Cluster {cluster_id} not found")
+        if cluster_index not in self.clusters:
+            raise ValueError(f"Cluster index {cluster_index} not found")
         
-        spike_times = self.clusters[cluster_id]['spike_times']
+        spike_times = self.clusters[cluster_index]['spike_times']
         
         # Apply time filter
         time_mask = (spike_times >= start_time) & (spike_times <= end_time)
@@ -374,7 +421,7 @@ class SessionData:
         zscore_neurons : bool
             Whether to z-score each neuron's activity (default: True)
         cluster_ids : list, optional
-            Specific cluster IDs to include. If None, uses all clusters.
+            Specific cluster indices to include. If None, uses all clusters.
             
         Returns:
         --------
@@ -383,7 +430,7 @@ class SessionData:
         time_bins : np.ndarray
             Time bin centers in milliseconds
         included_clusters : list
-            List of cluster IDs included in the matrix
+            List of cluster indices included in the matrix
         """
         # Determine which clusters to include
         if cluster_ids is None:
@@ -398,8 +445,8 @@ class SessionData:
         if end_time == np.inf:
             # Find maximum spike time across all clusters
             max_time = 0
-            for cluster_id in included_clusters:
-                spike_times = self.clusters[cluster_id]['spike_times']
+            for cluster_index in included_clusters:
+                spike_times = self.clusters[cluster_index]['spike_times']
                 if len(spike_times) > 0:
                     max_time = max(max_time, np.max(spike_times))
             end_time = max_time
@@ -414,8 +461,8 @@ class SessionData:
         population_matrix = np.zeros((n_neurons, n_time_bins))
         
         # Fill matrix with spike counts
-        for i, cluster_id in enumerate(included_clusters):
-            spike_times = self.get_spike_times(cluster_id, start_time, end_time)
+        for i, cluster_index in enumerate(included_clusters):
+            spike_times = self.get_spike_times(cluster_index, start_time, end_time)
             
             if len(spike_times) > 0:
                 # Count spikes in each time bin
@@ -441,86 +488,182 @@ class SessionData:
                 print("Applied z-scoring to neurons")
         
         return population_matrix, time_bins, included_clusters
-    
-    def get_session_summary(self) -> Dict:
+        
+    def get_sniff_data(self, start_time_ms: float = 0, 
+                      end_time_ms: float = np.inf) -> np.ndarray:
         """
-        Get summary statistics for the session.
-        
-        Returns:
-        --------
-        summary : dict
-            Dictionary with session statistics
-        """
-        if len(self.clusters) == 0:
-            return {'n_clusters': 0}
-        
-        # Calculate summary statistics
-        spike_counts = [info['n_spikes'] for info in self.clusters.values()]
-        
-        # Get session duration
-        all_spike_times = []
-        for cluster_info in self.clusters.values():
-            all_spike_times.extend(cluster_info['spike_times'])
-        
-        session_duration = (np.max(all_spike_times) - np.min(all_spike_times)) / 1000.0 if all_spike_times else 0
-        
-        # Count clusters by brain region (based on channel number)
-        ca1_clusters = 0
-        ob_clusters = 0
-        
-        for cluster_info in self.clusters.values():
-            if cluster_info['best_channel'] is not None:
-                if cluster_info['best_channel'] <= 16:
-                    ca1_clusters += 1
-                else:
-                    ob_clusters += 1
-        
-        summary = {
-            'n_clusters': len(self.clusters),
-            'ca1_clusters': ca1_clusters,
-            'ob_clusters': ob_clusters,
-            'session_duration_sec': session_duration,
-            'total_spikes': sum(spike_counts),
-            'mean_spikes_per_cluster': np.mean(spike_counts),
-            'median_spikes_per_cluster': np.median(spike_counts),
-            'cluster_ids': self.get_cluster_ids()
-        }
-        
-        return summary
-    
-    def load_events_data(self, events_base_path: Optional[str] = None) -> pd.DataFrame:
-        """
-        Load behavioral events data for this session.
+        Get sniff data within a time window.
         
         Parameters:
         -----------
-        events_base_path : str, optional
-            Base path for events data. If None, uses self.base_path with events structure.
+        start_time_ms : float
+            Start time in milliseconds (default: 0)
+        end_time_ms : float
+            End time in milliseconds (default: inf, uses full duration)
             
         Returns:
         --------
-        events : pd.DataFrame
-            Events dataframe with behavioral data
+        sniff_segment : np.ndarray
+            Sniff data for the specified time window
         """
-        if events_base_path is None:
-            # Modify base_path for events
-            if "kilosorted" in self.base_path:
-                events_base_path = self.base_path.replace("kilosorted", "events")
-            else:
-                events_base_path = self.base_path
+        if len(self.sniff) == 0:
+            return np.array([])
         
-        return self._load_events_data(self.mouse_id, self.session_id, events_base_path)
+        # Convert time to samples
+        start_sample = int(start_time_ms * self.sampling_rate / 1000.0)
+        
+        if end_time_ms == np.inf:
+            end_sample = len(self.sniff)
+        else:
+            end_sample = int(end_time_ms * self.sampling_rate / 1000.0)
+        
+        # Apply bounds checking
+        start_sample = max(0, start_sample)
+        end_sample = min(len(self.sniff), end_sample)
+        
+        return self.sniff[start_sample:end_sample]
     
-    def get_session_directories(self) -> List[str]:
+    def get_sniff_times(self) -> np.ndarray:
         """
-        Get sorted list of session directories for this mouse.
+        Get time vector for sniff data in milliseconds.
         
         Returns:
         --------
-        session_dirs : list of str
-            Sorted list of session directory names
+        times : np.ndarray
+            Time vector in milliseconds
         """
-        return self._get_session_directories(self.mouse_id, self.base_path)
+        if len(self.sniff) == 0:
+            return np.array([])
+        
+        return np.arange(len(self.sniff)) * (1000.0 / self.sampling_rate)
+    
+    def has_sniff_data(self) -> bool:
+        """
+        Check if sniff data is available.
+        
+        Returns:
+        --------
+        has_sniff : bool
+            True if sniff data is loaded, False otherwise
+        """
+        return len(self.sniff) > 0
+    
+    def filter_clusters(self, filter_expr: str) -> 'SessionData':
+        """
+        Filter clusters based on a condition and return a new SessionData object.
+        
+        Parameters:
+        -----------
+        filter_expr : str
+            Filter expression string (e.g., 'best_channel > 16', 'n_spikes >= 100')
+            Supported operators: >, <, >=, <=, ==, !=
+            Supported keys: any key in cluster dictionary
+            
+        Returns:
+        --------
+        filtered_session : SessionData
+            New SessionData object containing only clusters that meet the criteria
+            
+        Examples:
+        ---------
+        # Filter for olfactory bulb clusters (channels > 16)
+        ob_session = session.filter_clusters('best_channel > 16')
+        
+        # Filter for highly active clusters
+        active_session = session.filter_clusters('n_spikes >= 200')
+        
+        # Filter for specific channel
+        ch5_session = session.filter_clusters('best_channel == 5')
+        """
+        
+        # Parse the filter expression
+        # Order operators by length (longest first) to avoid partial matches
+        operators = [
+            ('>=', operator.ge),
+            ('<=', operator.le),
+            ('==', operator.eq),
+            ('!=', operator.ne),
+            ('>', operator.gt),
+            ('<', operator.lt)
+        ]
+        
+        # Find the operator in the expression
+        op_found = None
+        op_symbol = None
+        
+        for symbol, op_func in operators:
+            if symbol in filter_expr:
+                op_found = op_func
+                op_symbol = symbol
+                break
+        
+        if op_found is None:
+            raise ValueError(f"No valid operator found in filter expression: {filter_expr}")
+        
+        # Split the expression
+        parts = filter_expr.split(op_symbol)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid filter expression format: {filter_expr}")
+        
+        key = parts[0].strip()
+        value_str = parts[1].strip()
+        
+        # Convert value to appropriate type
+        try:
+            # Try to convert to number first
+            if '.' in value_str:
+                value = float(value_str)
+            else:
+                value = int(value_str)
+        except ValueError:
+            # If not a number, treat as string
+            value = value_str.strip('\'"')
+        
+        # Filter clusters
+        filtered_clusters = {}
+        filtered_indices = []
+        
+        for cluster_index, cluster_info in self.clusters.items():
+            if key not in cluster_info:
+                if self.verbose:
+                    print(f"Warning: Key '{key}' not found in cluster {cluster_index}")
+                continue
+            
+            cluster_value = cluster_info[key]
+            
+            # Handle None values
+            if cluster_value is None:
+                if op_symbol in ['==', '!=']:
+                    if (op_symbol == '==' and value is None) or (op_symbol == '!=' and value is not None):
+                        filtered_indices.append(cluster_index)
+                continue
+            
+            # Apply the filter
+            try:
+                if op_found(cluster_value, value):
+                    filtered_indices.append(cluster_index)
+            except TypeError as e:
+                if self.verbose:
+                    print(f"Warning: Cannot compare {cluster_value} with {value} for cluster {cluster_index}: {e}")
+                continue
+        
+        # Create new SessionData object
+        filtered_session = copy.copy(self)
+        filtered_session.clusters = {}
+        
+        # Re-index filtered clusters sequentially
+        for new_index, old_index in enumerate(filtered_indices):
+            filtered_session.clusters[new_index] = copy.deepcopy(self.clusters[old_index])
+        
+        filtered_session.n_clusters = len(filtered_session.clusters)
+        
+        # Copy signal data (sniff, etc.)
+        filtered_session.sniff = self.sniff.copy() if len(self.sniff) > 0 else np.array([])
+        
+        if self.verbose:
+            print(f"Filtered from {self.n_clusters} to {filtered_session.n_clusters} clusters using: {filter_expr}")
+        
+        return filtered_session
     
     def __repr__(self) -> str:
         """String representation of SessionData object."""
