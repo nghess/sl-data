@@ -83,7 +83,7 @@ class SessionData:
         self.reward = np.array([])
 
         # Load the data
-        self._load_kilosort_data()
+        self._load_ephys_data()
         self._load_events_data()
         self._process_clusters()
         self._process_signals()
@@ -131,7 +131,7 @@ class SessionData:
             print(f"Warning: {target_filename} not found for {self.mouse_id}/{self.session_id} in {search_dir}")
         return None
 
-    def _load_kilosort_data(self):
+    def _load_ephys_data(self):
         """Load raw Kilosort data files."""
         try:
             self.raw_data = self._load_kilosort_files(
@@ -166,7 +166,7 @@ class SessionData:
         files_needed : list of str, optional
             Specific files to load. If None, loads all standard files.
             Options: ['spike_times', 'spike_templates', 'templates', 'amplitudes', 
-                     'whitening_mat_inv', 'sniff']
+                     'whitening_mat_inv', 'sniff', 'events']
             
         Returns:
         --------
@@ -176,7 +176,7 @@ class SessionData:
         # Default files to load
         if files_needed is None:
             files_needed = ['spike_times', 'spike_templates', 'templates', 'amplitudes', 
-                           'whitening_mat_inv', 'sniff']
+                           'whitening_mat_inv', 'sniff', 'events']
         
         data = {}
         
@@ -187,7 +187,8 @@ class SessionData:
             'templates': 'templates.npy',
             'amplitudes': 'amplitudes.npy',
             'whitening_mat_inv': 'whitening_mat_inv.npy',
-            'sniff': 'sniff.npy'
+            'sniff': 'sniff.npy',
+            'events': 'events.csv'
         }
         
         # Load each requested file using flexible path finding
@@ -222,9 +223,17 @@ class SessionData:
         events_path = self._get_file_path("events.csv")
         
         if events_path is None:
-            raise FileNotFoundError(f"Events file (events.csv) not found for {self.mouse_id}_{self.session_id}")
+            if self.verbose:
+                print("Warning: events.csv not found")
+            return
         
-        self.events = pd.read_csv(events_path)
+        try:
+            self.events = pd.read_csv(events_path)
+            if self.verbose:
+                print(f"Successfully loaded events from {events_path}")
+        except Exception as e:
+            if self.verbose:
+                print(f"Error loading events from {events_path}: {e}")
     
     def _get_cluster_spike_times(self, spike_times: np.ndarray, spike_templates: np.ndarray, 
                                 cluster_id: int, position_times: Optional[np.ndarray] = None,
