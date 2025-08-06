@@ -497,6 +497,122 @@ class SessionData:
                 print("Applied z-scoring to neurons")
         
         return population_matrix, time_bins, included_clusters
+    
+    def create_event_colormap(self, time_bins: np.ndarray, event_column: str, 
+                             aggregation: str = 'mean', 
+                             timestamp_column: str = 'timestamp_ms') -> np.ndarray:
+        """
+        Create a color map for time bins based on event data.
+        
+        Parameters:
+        -----------
+        time_bins : np.ndarray
+            Time bin centers in milliseconds (typically from create_population_raster)
+        event_column : str
+            Column name from events dataframe to use for color mapping
+        aggregation : str
+            How to aggregate events within each time bin:
+            - 'mean': average value (for continuous variables like speed)
+            - 'max': maximum value 
+            - 'min': minimum value
+            - 'any': True if any event in bin is True (for boolean variables)
+            - 'all': True if all events in bin are True (for boolean variables)
+            - 'sum': sum of values in bin
+            - 'count': number of events in bin
+        timestamp_column : str
+            Column name containing timestamps (default: 'timestamp_ms')
+            
+        Returns:
+        --------
+        color_values : np.ndarray
+            Array of values for each time bin, same length as time_bins
+            
+        Examples:
+        ---------
+        # Get population raster
+        pop_matrix, time_bins, clusters = session.create_population_raster()
+        
+        # Create color map based on reward state (boolean)
+        reward_colors = session.create_event_colormap(time_bins, 'reward_state', 'any')
+        
+        # Create color map based on average speed
+        speed_colors = session.create_event_colormap(time_bins, 'speed', 'mean')
+        """
+        if self.events.empty:
+            if self.verbose:
+                print("Warning: No events data available")
+            return np.zeros(len(time_bins))
+        
+        if event_column not in self.events.columns:
+            raise ValueError(f"Column '{event_column}' not found in events data. "
+                           f"Available columns: {list(self.events.columns)}")
+        
+        if timestamp_column not in self.events.columns:
+            raise ValueError(f"Timestamp column '{timestamp_column}' not found in events data")
+        
+        # Convert timestamps to milliseconds if needed
+        if pd.api.types.is_datetime64_any_dtype(self.events[timestamp_column]):
+            # Convert datetime to milliseconds from start
+            start_time = self.events[timestamp_column].iloc[0]
+            event_times_ms = (self.events[timestamp_column] - start_time).dt.total_seconds() * 1000
+        else:
+            # Assume already in milliseconds - convert to numeric to handle any string values
+            event_times_ms = pd.to_numeric(self.events[timestamp_column], errors='coerce')
+        
+        # Remove any NaN values that might result from conversion
+        valid_mask = ~pd.isna(event_times_ms)
+        if not valid_mask.all():
+            if self.verbose:
+                print(f"Warning: {(~valid_mask).sum()} invalid timestamps found and will be ignored")
+            event_times_ms = event_times_ms[valid_mask]
+            # Also filter the events dataframe to match
+            events_subset = self.events[valid_mask]
+        else:
+            events_subset = self.events
+        
+        # Calculate time bin edges from bin centers
+        bin_size_ms = time_bins[1] - time_bins[0] if len(time_bins) > 1 else 50.0
+        time_edges = time_bins - bin_size_ms / 2
+        time_edges = np.append(time_edges, time_edges[-1] + bin_size_ms)
+        
+        # Initialize color values array
+        color_values = np.zeros(len(time_bins))
+        
+        # For each time bin, find events that fall within it and aggregate
+        for i, (start_edge, end_edge) in enumerate(zip(time_edges[:-1], time_edges[1:])):
+            # Find events within this time bin
+            mask = (event_times_ms >= start_edge) & (event_times_ms < end_edge)
+            bin_events = events_subset.loc[events_subset.index[mask], event_column]
+            
+            if len(bin_events) == 0:
+                # No events in this bin
+                color_values[i] = 0 if aggregation in ['mean', 'max', 'min', 'sum'] else False
+                continue
+            
+            # Apply aggregation function
+            if aggregation == 'mean':
+                color_values[i] = bin_events.mean()
+            elif aggregation == 'max':
+                color_values[i] = bin_events.max()
+            elif aggregation == 'min':
+                color_values[i] = bin_events.min()
+            elif aggregation == 'any':
+                color_values[i] = bin_events.any()
+            elif aggregation == 'all':
+                color_values[i] = bin_events.all()
+            elif aggregation == 'sum':
+                color_values[i] = bin_events.sum()
+            elif aggregation == 'count':
+                color_values[i] = len(bin_events)
+            else:
+                raise ValueError(f"Unknown aggregation method: {aggregation}. "
+                               f"Supported: 'mean', 'max', 'min', 'any', 'all', 'sum', 'count'")
+        
+        if self.verbose:
+            print(f"Created color map from '{event_column}' using '{aggregation}' aggregation")
+            print(f"Value range: {np.min(color_values):.3f} to {np.max(color_values):.3f}")
+        
+        return color_values
         
     def get_sniff_data(self, start_time_ms: float = 0, 
                       end_time_ms: float = np.inf) -> np.ndarray:

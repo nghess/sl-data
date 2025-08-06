@@ -273,6 +273,9 @@ def process_events(idx, event_paths_a, event_paths_b):
     # Calculate speed and direction
     event_data['speed'] = calculate_speed(event_data)
     event_data['direction'] = calculate_direction(event_data)
+    
+    # Add drinking column
+    event_data['drinking'] = calculate_drinking(event_data)
 
     return event_data
 
@@ -292,4 +295,27 @@ def calculate_direction(data):
     direction = np.arctan2(dy, dx)
     # Add 0 at start to match length 
     return np.concatenate(([0], direction))
+
+def calculate_drinking(data):
+    """Calculate drinking periods between reward_state True->False and iti False->True"""
+    drinking = np.zeros(len(data), dtype=bool)
+    
+    # Find reward_state transitions from True to False
+    reward_transitions = np.where((data['reward_state'].shift(1) == True) & 
+                                 (data['reward_state'] == False))[0]
+    
+    # Find iti transitions from False to True
+    iti_transitions = np.where((data['iti'].shift(1) == False) & 
+                              (data['iti'] == True))[0]
+    
+    # For each reward_state True->False transition, find the next iti False->True transition
+    for reward_idx in reward_transitions:
+        # Find the next iti transition after this reward transition
+        next_iti = iti_transitions[iti_transitions > reward_idx]
+        if len(next_iti) > 0:
+            iti_idx = next_iti[0]
+            # Mark drinking period from reward transition to iti transition
+            drinking[reward_idx:iti_idx] = True
+    
+    return drinking
 
