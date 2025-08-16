@@ -12,6 +12,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional, Dict, Tuple, Union, List
 from scipy.stats import zscore
+from scipy.signal import find_peaks
 import os
 import operator
 import copy
@@ -40,6 +41,8 @@ class SessionData:
         Number of clusters loaded (after filtering)
     sniff : np.ndarray
         Sniff signal data (if available)
+    sniff_times : np.ndarray
+        Peak times of sniff signal in milliseconds (if available)
     """
     
     def __init__(self, mouse_id: str, session_id: str, experiment: str, base_path: str = "S:\\", 
@@ -79,6 +82,7 @@ class SessionData:
 
         # Initialize signal traces
         self.sniff = np.array([])
+        self.sniff_times = np.array([])
         self.iti = np.array([])
         self.reward = np.array([])
 
@@ -613,6 +617,70 @@ class SessionData:
             print(f"Value range: {np.min(color_values):.3f} to {np.max(color_values):.3f}")
         
         return color_values
+    
+    def find_sniff_peaks(self, height: Optional[float] = None, 
+                        prominence: Optional[float] = None, 
+                        distance: Optional[int] = None,
+                        width: Optional[Union[int, Tuple[int, int]]] = None) -> np.ndarray:
+        """
+        Find peaks in the sniff signal and store peak times in sniff_times attribute.
+        
+        Parameters:
+        -----------
+        height : float, optional
+            Required minimum height of peaks. If None, uses default scipy behavior.
+        prominence : float, optional
+            Required prominence of peaks. If None, uses default scipy behavior.
+        distance : int, optional
+            Required minimal horizontal distance between peaks in samples.
+        width : int or tuple of ints, optional
+            Required width of peaks in samples.
+            
+        Returns:
+        --------
+        peak_times : np.ndarray
+            Array of peak times in milliseconds
+            
+        Examples:
+        ---------
+        # Find all peaks with default parameters
+        peak_times = session.find_sniff_peaks()
+        
+        # Find prominent peaks with minimum distance
+        peak_times = session.find_sniff_peaks(prominence=0.5, distance=100)
+        
+        # Find peaks with specific height threshold
+        peak_times = session.find_sniff_peaks(height=0.2)
+        """
+        if len(self.sniff) == 0:
+            if self.verbose:
+                print("Warning: No sniff data available for peak detection")
+            self.sniff_times = np.array([])
+            return self.sniff_times
+        
+        # Build parameters dictionary for find_peaks
+        peak_params = {}
+        if height is not None:
+            peak_params['height'] = height
+        if prominence is not None:
+            peak_params['prominence'] = prominence
+        if distance is not None:
+            peak_params['distance'] = distance
+        if width is not None:
+            peak_params['width'] = width
+        
+        # Find peaks in the sniff signal
+        peak_indices, _ = find_peaks(self.sniff, **peak_params)
+        
+        # Convert peak indices to times in milliseconds
+        self.sniff_times = peak_indices * (1000.0 / self.sampling_rate)
+        
+        if self.verbose:
+            print(f"Found {len(self.sniff_times)} peaks in sniff signal")
+            if len(self.sniff_times) > 0:
+                print(f"Peak times range: {self.sniff_times[0]:.1f} - {self.sniff_times[-1]:.1f} ms")
+        
+        return self.sniff_times
         
     def get_sniff_data(self, start_time_ms: float = 0, 
                       end_time_ms: float = np.inf) -> np.ndarray:
@@ -784,11 +852,229 @@ class SessionData:
         
         # Copy signal data (sniff, etc.)
         filtered_session.sniff = self.sniff.copy() if len(self.sniff) > 0 else np.array([])
+        filtered_session.sniff_times = self.sniff_times.copy() if len(self.sniff_times) > 0 else np.array([])
         
         if self.verbose:
             print(f"Filtered from {self.n_clusters} to {filtered_session.n_clusters} clusters using: {filter_expr}")
         
         return filtered_session
+    
+    def filter_events(self, filter_expr: str, timestamp_column: str = 'timestamp_ms', 
+                     return_false_condition: bool = False) -> Union['SessionData', Tuple['SessionData', 'SessionData']]:
+        """
+        Filter spike times based on events data and return a new SessionData object.
+        
+        Parameters:
+        -----------
+        filter_expr : str
+            Filter expression string (e.g., 'reward_state == 1', 'speed > 5.0')
+            Supported operators: >, <, >=, <=, ==, !=
+            Supported keys: any column name in events dataframe
+        timestamp_column : str
+            Column name containing timestamps (default: 'timestamp_ms')
+        return_false_condition : bool
+            If True, also return a SessionData object containing spikes where condition was False
+            
+        Returns:
+        --------
+        filtered_session : SessionData or tuple of SessionData
+            New SessionData object(s) with spike times filtered based on events condition.
+            If return_false_condition=True, returns (true_condition_session, false_condition_session)
+            
+        Examples:
+        ---------
+        # Filter spikes during reward periods
+        reward_session = session.filter_events('reward_state == 1')
+        
+        # Filter spikes during high speed periods, also get low speed periods
+        high_speed, low_speed = session.filter_events('speed > 5.0', return_false_condition=True)
+        """
+        
+        if self.events.empty:
+            raise ValueError("No events data available for filtering")
+        
+        if timestamp_column not in self.events.columns:
+            raise ValueError(f"Timestamp column '{timestamp_column}' not found in events data")
+        
+        # Parse the filter expression (reuse logic from filter_clusters)
+        operators = [
+            ('>=', operator.ge),
+            ('<=', operator.le),
+            ('==', operator.eq),
+            ('!=', operator.ne),
+            ('>', operator.gt),
+            ('<', operator.lt)
+        ]
+        
+        op_found = None
+        op_symbol = None
+        
+        for symbol, op_func in operators:
+            if symbol in filter_expr:
+                op_found = op_func
+                op_symbol = symbol
+                break
+        
+        if op_found is None:
+            raise ValueError(f"No valid operator found in filter expression: {filter_expr}")
+        
+        parts = filter_expr.split(op_symbol)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid filter expression format: {filter_expr}")
+        
+        key = parts[0].strip()
+        value_str = parts[1].strip()
+        
+        if key not in self.events.columns:
+            raise ValueError(f"Column '{key}' not found in events data. "
+                           f"Available columns: {list(self.events.columns)}")
+        
+        # Convert value to appropriate type
+        try:
+            if '.' in value_str:
+                value = float(value_str)
+            else:
+                value = int(value_str)
+        except ValueError:
+            # Handle boolean values
+            value_cleaned = value_str.strip('\'"').lower()
+            if value_cleaned in ['true', '1']:
+                value = True
+            elif value_cleaned in ['false', '0']:
+                value = False
+            else:
+                value = value_str.strip('\'"')
+        
+        # Convert timestamps to milliseconds if needed
+        if pd.api.types.is_datetime64_any_dtype(self.events[timestamp_column]):
+            start_time = self.events[timestamp_column].iloc[0]
+            event_times_ms = (self.events[timestamp_column] - start_time).dt.total_seconds() * 1000
+        else:
+            event_times_ms = pd.to_numeric(self.events[timestamp_column], errors='coerce')
+        
+        # Remove any NaN values
+        valid_mask = ~pd.isna(event_times_ms)
+        if not valid_mask.all():
+            if self.verbose:
+                print(f"Warning: {(~valid_mask).sum()} invalid timestamps found and will be ignored")
+            event_times_ms = event_times_ms[valid_mask]
+            events_subset = self.events[valid_mask].copy()
+        else:
+            events_subset = self.events.copy()
+            
+        # Apply the condition to events
+        try:
+            condition_mask = op_found(events_subset[key], value)
+        except TypeError as e:
+            raise ValueError(f"Cannot apply condition '{filter_expr}': {e}")
+        
+        
+        def _filter_spikes_by_condition(condition_mask):
+            """Helper function to filter spike times based on condition periods."""
+            filtered_clusters = {}
+            
+            # Find time periods where condition is true
+            if not condition_mask.any():
+                # No periods where condition is true
+                for cluster_index, cluster_info in self.clusters.items():
+                    new_cluster_info = copy.deepcopy(cluster_info)
+                    new_cluster_info['spike_times'] = np.array([])
+                    new_cluster_info['n_spikes'] = 0
+                    filtered_clusters[cluster_index] = new_cluster_info
+                return filtered_clusters
+            
+            # Get time periods where condition is true
+            true_times = event_times_ms[condition_mask].values
+            
+            # Create time intervals where condition is true
+            # For continuous data, we need to group consecutive true periods
+            time_intervals = []
+            if len(true_times) > 0:
+                # Sort times to be safe
+                true_times = np.sort(true_times)
+                
+                # Group consecutive time points (within reasonable gap)
+                # Assume events are sampled regularly, use median gap as threshold
+                if len(true_times) > 1:
+                    gaps = np.diff(true_times)
+                    median_gap = np.median(gaps)
+                    max_gap = median_gap * 2  # Allow up to 2x median gap
+                else:
+                    max_gap = 100  # Default 100ms gap
+                
+                start_time = true_times[0]
+                end_time = true_times[0]
+                
+                for i in range(1, len(true_times)):
+                    if true_times[i] - end_time <= max_gap:
+                        # Extend current interval
+                        end_time = true_times[i]
+                    else:
+                        # Save current interval and start new one
+                        time_intervals.append((start_time, end_time))
+                        start_time = true_times[i]
+                        end_time = true_times[i]
+                
+                # Don't forget the last interval
+                time_intervals.append((start_time, end_time))
+            
+            # Filter spikes for each cluster
+            for cluster_index, cluster_info in self.clusters.items():
+                spike_times = cluster_info['spike_times']
+                
+                if len(spike_times) == 0 or len(time_intervals) == 0:
+                    filtered_spike_times = np.array([])
+                else:
+                    # Find spikes that fall within any of the true time intervals
+                    valid_spikes = []
+                    for start_time, end_time in time_intervals:
+                        # Include spikes within this interval
+                        mask = (spike_times >= start_time) & (spike_times <= end_time)
+                        valid_spikes.extend(spike_times[mask])
+                    
+                    filtered_spike_times = np.array(valid_spikes)
+                
+                # Create new cluster info with filtered spike times
+                new_cluster_info = copy.deepcopy(cluster_info)
+                new_cluster_info['spike_times'] = filtered_spike_times
+                new_cluster_info['n_spikes'] = len(filtered_spike_times)
+                filtered_clusters[cluster_index] = new_cluster_info
+            
+            return filtered_clusters
+        
+        # Create filtered session for true condition
+        true_session = copy.copy(self)
+        true_session.clusters = _filter_spikes_by_condition(condition_mask)
+        true_session.n_clusters = len(true_session.clusters)
+        
+        # Copy signal data
+        true_session.sniff = self.sniff.copy() if len(self.sniff) > 0 else np.array([])
+        true_session.sniff_times = self.sniff_times.copy() if len(self.sniff_times) > 0 else np.array([])
+        true_session.events = self.events.copy()
+        
+        if self.verbose:
+            total_true_spikes = sum(cluster['n_spikes'] for cluster in true_session.clusters.values())
+            total_original_spikes = sum(cluster['n_spikes'] for cluster in self.clusters.values())
+            print(f"Filtered spikes with condition '{filter_expr}': {total_true_spikes}/{total_original_spikes} spikes retained")
+        
+        if not return_false_condition:
+            return true_session
+        
+        # Create filtered session for false condition
+        false_session = copy.copy(self)
+        false_session.clusters = _filter_spikes_by_condition(~condition_mask)
+        false_session.n_clusters = len(false_session.clusters)
+        
+        # Copy signal data
+        false_session.sniff = self.sniff.copy() if len(self.sniff) > 0 else np.array([])
+        false_session.sniff_times = self.sniff_times.copy() if len(self.sniff_times) > 0 else np.array([])
+        false_session.events = self.events.copy()
+        
+        if self.verbose:
+            total_false_spikes = sum(cluster['n_spikes'] for cluster in false_session.clusters.values())
+            print(f"False condition spikes: {total_false_spikes}/{total_original_spikes} spikes")
+        
+        return true_session, false_session
     
     def __repr__(self) -> str:
         """String representation of SessionData object."""

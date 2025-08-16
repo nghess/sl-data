@@ -2,12 +2,7 @@ import os
 import re
 import numpy as np
 import pandas as pd
-#from kilosort import run_kilosort
-#from kilosort.io import save_preprocessing, load_ops
 from pathlib import Path
-import cv2
-import ast
-
 
 """
 Helper Functions Below
@@ -45,6 +40,16 @@ def show_paths(data_paths, print_n=np.inf):
     for ii, path in enumerate(data_paths[:min(print_n, len(data_paths))]):
         print(f"{ii} {path}")
 
+# Paths are valid only their final two parent directories (mouse and session ids) match the reference paths
+def filter_paths(paths_to_filter, paths_to_reference):
+    filtered_paths = []
+    for path in paths_to_filter:
+        for ref_path in paths_to_reference:
+            if (path.parents[1].name == ref_path.parents[1].name and 
+                path.parents[0].name == ref_path.parents[0].name):
+                filtered_paths.append(path)
+                break
+    return filtered_paths
 
 """
 Functions for camera TTL
@@ -198,7 +203,7 @@ def convert_timestamps_to_ms(timestamps_df):
 
 
 # Clickbait event dataframe handling:
-def process_events(idx, event_paths_a, event_paths_b):
+def process_events(idx, event_paths_a, event_paths_b, columns: dict):
     """
     Process event data from paired CSV files.
     
@@ -206,22 +211,20 @@ def process_events(idx, event_paths_a, event_paths_b):
         event_paths_a: List of paths to eventsA CSV files
         event_paths_b: List of paths to eventsB CSV files
         idx: Index of the session to process
+        columns: Dictionary of variable names and datatypes
         
     Returns:
         DataFrame containing processed event data
     """
-    # Load events .csv part A
-    col_names_a = ['trial_number', 'timestamp', 'poke_left', 'poke_right', 'centroid_x', 'centroid_y', 'target_cell']
+    # Load events .csv part A (This .csv is always 7 cols wide, but we don't hardcode in case Bonsai WriteCsv improves.)
     event_data_a = pd.read_csv(event_paths_a[idx])
+    col_names_a = list(columns.keys())[:len(event_data_a.columns)]
     event_data_a.columns = col_names_a
     pd.to_datetime(event_data_a['timestamp'])
 
-    # Load events .csv part B
+    # Load events .csv part B (col number varies by experimental condition, so we need to load in col names flexibly.)
     event_data_b = pd.read_csv(event_paths_b[idx])
-    if event_data_b.shape[1] == 6:
-        col_names_b = ['iti', 'reward_state', 'water_left', 'water_right', 'click', 'flip_state']
-    elif event_data_b.shape[1] == 5:
-        col_names_b = ['iti', 'reward_state', 'water_left', 'water_right', 'click']
+    col_names_b = list(columns.keys())[len(event_data_a.columns):]
     event_data_b.columns = col_names_b
 
     # Concatenate eventsA and eventsB dataframes
@@ -236,45 +239,14 @@ def process_events(idx, event_paths_a, event_paths_b):
         event_data_b = event_data_b.iloc[:min_length]
         event_data = pd.concat([event_data_a, event_data_b], axis=1)
 
-    if event_data_b.shape[1] == 6:
-        # Set types for each column in the dataframe
-        event_data = event_data.astype({
-            'trial_number': 'uint8',
-            'timestamp': 'datetime64[ns]',
-            'poke_left': 'bool',
-            'poke_right': 'bool',
-            'centroid_x': 'uint16',
-            'centroid_y': 'uint16',
-            'target_cell': 'str',
-            'iti': 'bool',
-            'water_left': 'bool',
-            'water_right': 'bool',
-            'reward_state': 'bool',
-            'click': 'bool',
-            'flip_state': 'bool'
-            })
-    elif event_data_b.shape[1] == 5:
-        # Set types for each column in the dataframe
-        event_data = event_data.astype({
-            'trial_number': 'uint8',
-            'timestamp': 'datetime64[ns]',
-            'poke_left': 'bool',
-            'poke_right': 'bool',
-            'centroid_x': 'uint16',
-            'centroid_y': 'uint16',
-            'target_cell': 'str',
-            'iti': 'bool',
-            'water_left': 'bool',
-            'water_right': 'bool',
-            'reward_state': 'bool',
-            'click': 'bool',
-            })
+    # Set columns to appropriate types as specified in columns dictionary
+    event_data = event_data.astype(columns)
 
-    # Calculate speed and direction
+    # Calculate speed and direction columns
     event_data['speed'] = calculate_speed(event_data)
     event_data['direction'] = calculate_direction(event_data)
     
-    # Add drinking column
+    # Add 'drinking' column (period between reward initiation poke and start of ITI)
     event_data['drinking'] = calculate_drinking(event_data)
 
     return event_data
@@ -297,7 +269,7 @@ def calculate_direction(data):
     return np.concatenate(([0], direction))
 
 def calculate_drinking(data):
-    """Calculate drinking periods between reward_state True->False and iti False->True"""
+    """Calculate drinking periods between reward_state True->False and ITI False->True"""
     drinking = np.zeros(len(data), dtype=bool)
     
     # Find reward_state transitions from True to False
