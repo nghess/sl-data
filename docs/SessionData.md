@@ -6,7 +6,7 @@
 
 ## Overview
 
-The `SessionData` class is a standalone tool for loading, storing, and manipulating neural and behavioral data from a single recording session. It provides a unified interface to work with Kilosort spike sorting output, Bonsai behavioral tracking data, and associated signal recordings.
+The `SessionData` class is a standalone tool for loading, storing, and manipulating neural and behavioral data from a single recording session. It provides a unified interface to work with Kilosort spike sorting output, Bonsai behavioral tracking data, and associated behavioral and event recordings.
 
 ## Key Features
 

@@ -7,7 +7,7 @@ neural data from Kilosort output files.
 
 import numpy as np
 import matplotlib.pyplot as plt
-from session_data import SessionData
+from sldata import SessionData
 
 def test_session_data():
     """Test SessionData class with sample mouse and session."""

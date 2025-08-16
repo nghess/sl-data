@@ -17,7 +17,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import torch
 
-from SessionData import SessionData
+from sldata import SessionData
 from neural_classifier import PopulationClassifier, PopulationDataset
 
 

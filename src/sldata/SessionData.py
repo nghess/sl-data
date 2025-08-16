@@ -1,7 +1,7 @@
 """
-SessionData class for storing and manipulating neural and behavioral data.
+SessionData class for storing and manipulating preprocessed neural and behavioral data.
 
-This module provides a standalone class to encapsulate neural data from a single recording session,
+This module provides a standalone class to encapsulate preprocessed neural data from a single recording session,
 including spike times, cluster information, and simple population activity binning tools.
 
 Code by Nate Gonzales-Hess, August 2025.
@@ -49,7 +49,7 @@ class SessionData:
                  sampling_rate: float = 30000.0, min_spikes: int = 50,
                  verbose: bool = True):
         """
-        Initialize SessionData object by loading Kilosort data.
+        Initialize SessionData object by loading preprocessed neural data.
         
         Parameters:
         -----------
@@ -58,7 +58,7 @@ class SessionData:
         session_id : str
             Session identifier (e.g., 'v1')
         base_path : str
-            Base directory path for data files
+            Base directory path for preprocessed data files
         sampling_rate : float
             Neural data sampling rate in Hz
         min_spikes : int
@@ -136,7 +136,7 @@ class SessionData:
         return None
 
     def _load_ephys_data(self):
-        """Load raw Kilosort data files."""
+        """Load preprocessed neural data files."""
         try:
             self.raw_data = self._load_kilosort_files(
                 self.mouse_id, 
@@ -150,12 +150,12 @@ class SessionData:
                 print(f"Loaded data: {list(self.raw_data.keys())}")
                 
         except Exception as e:
-            raise ValueError(f"Failed to load Kilosort data: {e}")
+            raise ValueError(f"Failed to load preprocessed neural data: {e}")
     
     def _load_kilosort_files(self, mouse_id: str, session_id: str, experiment: str, base_path: str = "S:\\", 
                             files_needed: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
         """
-        Load kilosort spike sorting data for a given mouse and session using flexible path finding.
+        Load preprocessed spike sorting data for a given mouse and session using flexible path finding.
         
         Parameters:
         -----------
