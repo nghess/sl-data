@@ -1076,6 +1076,40 @@ class SessionData:
         
         return true_session, false_session
     
+    def get_session_summary(self) -> Dict:
+        """
+        Get a summary of the session data.
+        
+        Returns:
+        --------
+        summary : dict
+            Dictionary containing basic session information
+        """
+        # Basic session info
+        summary = {
+            'mouse_id': self.mouse_id,
+            'session_id': self.session_id,
+            'experiment': self.experiment,
+            'n_clusters': self.n_clusters,
+        }
+        
+        # Event columns
+        if not self.events.empty:
+            summary['event_columns'] = list(self.events.columns)
+            
+            # Calculate session duration from timestamp_ms column
+            if 'timestamp_ms' in self.events.columns:
+                timestamps = self.events['timestamp_ms']
+                duration_ms = timestamps.max() - timestamps.min()
+                summary['session_duration_min'] = round(duration_ms / (1000 * 60), 2)
+            else:
+                summary['session_duration_min'] = 'N/A (no timestamp_ms column)'
+        else:
+            summary['event_columns'] = []
+            summary['session_duration_min'] = 'N/A (no events data)'
+        
+        return summary
+    
     def __repr__(self) -> str:
         """String representation of SessionData object."""
         return f"SessionData({self.mouse_id}_{self.session_id}, {self.n_clusters} clusters)"

@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sldata"
 version = "0.1.0"
-description = "A Python library for preprocessed neural spike data analysis"
+description = "A Python library for preprocessed neural spike data and behavioral analysis"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Nate Gonzales-Hess", email = "nate.gonzales.hess@gmail.com"}
+    {name = "Nate Gonzales-Hess", email = "nhess@uoregon.edu"}
 ]
 keywords = ["neuroscience", "neural-data", "spike-analysis", "behavioral-analysis"]
 classifiers = [
@@ -47,9 +47,8 @@ examples = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/your-username/sl-data"
-"Bug Reports" = "https://github.com/your-username/sl-data/issues"
-"Source" = "https://github.com/your-username/sl-data"
+"Homepage" = "https://github.com/nghess/sl-data"
+"Source" = "https://github.com/nghess/sl-data/src/sldata"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
