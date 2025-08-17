@@ -87,6 +87,7 @@ class SessionData:
         self.sniff_times = np.array([])
         self.iti = np.array([])
         self.reward = np.array([])
+        
 
         # Load the data
         self._load_ephys_data()
@@ -95,10 +96,13 @@ class SessionData:
         self._process_signals()
         self.find_sniff_peaks(prominence=1000, distance=50)
         
+        
         if verbose:
             print(f"Loaded {self.n_clusters} clusters for {mouse_id}_{session_id}")
             if len(self.sniff) > 0:
                 print(f"Loaded sniff data: {len(self.sniff)} samples")
+            if len(self.sniff_times) > 0:
+                print(f"Found {len(self.sniff_times)} sniff events")
     
     def _get_file_path(self, target_filename: str) -> Optional[Path]:
         """
@@ -1125,6 +1129,276 @@ class SessionData:
             summary['session_duration_min'] = 'N/A (no events data)'
         
         return summary
+    
+    def create_sniff_locked_raster(self, cluster_idx: int, window_ms: float = 500.0, 
+                                  n_spikes_for_sorting: int = 3) -> np.ndarray:
+        """
+        Create sniff-locked raster for a specific cluster.
+        
+        Parameters:
+        -----------
+        cluster_idx : int
+            Index of the cluster to analyze
+        window_ms : float
+            Half-window size around sniff events in milliseconds (default: 500ms = ±500ms window)
+        n_spikes_for_sorting : int
+            Number of spikes to average for sorting by latency (default: 3)
+            
+        Returns:
+        --------
+        raster_matrix : np.ndarray
+            Sniff-locked raster matrix [n_sniffs x n_timesteps], sorted by spike latency
+        """
+        if len(self.sniff_times) == 0:
+            if self.verbose:
+                print("Warning: No sniff events found for sniff-locked analysis")
+            return np.array([])
+        
+        if cluster_idx not in self.clusters:
+            raise ValueError(f"Cluster {cluster_idx} not found")
+        
+        spike_times = self.clusters[cluster_idx]['spike_times']
+        
+        # Create time bins for the window (1ms resolution)
+        time_bins = np.arange(-window_ms, window_ms + 1, 1.0)  # +1 to include endpoint
+        n_timesteps = len(time_bins)
+        n_sniffs = len(self.sniff_times)
+        
+        # Initialize raster matrix
+        raster_matrix = np.zeros((n_sniffs, n_timesteps))
+        latencies = np.full(n_sniffs, np.inf)  # For sorting
+        
+        # Process each sniff event
+        for sniff_idx, sniff_time in enumerate(self.sniff_times):
+            # Find spikes within the window around this sniff
+            start_time = sniff_time - window_ms
+            end_time = sniff_time + window_ms
+            
+            # Get spikes in window
+            window_spikes = spike_times[(spike_times >= start_time) & (spike_times <= end_time)]
+            
+            # Convert spike times to relative times (sniff at 0)
+            relative_spike_times = window_spikes - sniff_time
+            
+            # Fill raster for this sniff
+            for spike_time in relative_spike_times:
+                # Find closest time bin (1ms resolution)
+                bin_idx = np.argmin(np.abs(time_bins - spike_time))
+                if 0 <= bin_idx < n_timesteps:
+                    raster_matrix[sniff_idx, bin_idx] = 1
+            
+            # Calculate latency for sorting (mean time of next n spikes after sniff)
+            post_sniff_spikes = relative_spike_times[relative_spike_times > 0]
+            if len(post_sniff_spikes) >= n_spikes_for_sorting:
+                latencies[sniff_idx] = np.mean(post_sniff_spikes[:n_spikes_for_sorting])
+            elif len(post_sniff_spikes) > 0:
+                # Use available spikes if fewer than n_spikes_for_sorting
+                latencies[sniff_idx] = np.mean(post_sniff_spikes)
+        
+        # Sort raster matrix by latency (shortest latency first)
+        # Handle inf values (no post-sniff spikes) by putting them at the end
+        valid_latencies = latencies[latencies != np.inf]
+        invalid_indices = np.where(latencies == np.inf)[0]
+        
+        if len(valid_latencies) > 0:
+            valid_indices = np.where(latencies != np.inf)[0]
+            sorted_valid_indices = valid_indices[np.argsort(latencies[valid_indices])]
+            # Combine sorted valid indices with invalid indices at the end
+            sorted_indices = np.concatenate([sorted_valid_indices, invalid_indices])
+        else:
+            # All latencies are inf, keep original order
+            sorted_indices = np.arange(n_sniffs)
+        
+        raster_matrix = raster_matrix[sorted_indices]
+        
+        # Store the result in the cluster data
+        self.clusters[cluster_idx]['sniff_locked_raster'] = {
+            'raster_matrix': raster_matrix,
+            'time_bins': time_bins,
+            'window_ms': window_ms,
+            'n_spikes_for_sorting': n_spikes_for_sorting,
+            'sorted_indices': sorted_indices,
+            'latencies': latencies[sorted_indices]
+        }
+        
+        if self.verbose:
+            print(f"Created sniff-locked raster for cluster {cluster_idx}: "
+                  f"{raster_matrix.shape} (sniffs x timesteps)")
+        
+        return raster_matrix
+    
+    def get_sniff_locked_scatter_data(self, cluster_indices: Optional[List[int]] = None, 
+                                    window_ms: float = 500.0, 
+                                    n_spikes_for_sorting: int = 5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Create sparse scatter plot data for sniff-locked analysis.
+        
+        Much more memory efficient than full raster matrices - only stores actual spike times.
+        Sniff events are sorted by spike latency for better visualization.
+        
+        Parameters:
+        -----------
+        cluster_indices : List[int], optional
+            List of cluster indices to include. If None, uses all clusters.
+        window_ms : float
+            Half-window size around sniff events in milliseconds (default: 500ms)
+        n_spikes_for_sorting : int
+            Number of spikes to average for sorting by latency (default: 3)
+            
+        Returns:
+        --------
+        sniff_indices : np.ndarray
+            Array of sniff event indices (for y-axis of scatter plot) - sorted by latency
+        relative_spike_times : np.ndarray  
+            Array of spike times relative to sniff events (for x-axis of scatter plot)
+        cluster_ids : np.ndarray
+            Array of cluster indices corresponding to each spike (for coloring/grouping)
+        """
+        if len(self.sniff_times) == 0:
+            if self.verbose:
+                print("Warning: No sniff events found for scatter plot")
+            return np.array([]), np.array([]), np.array([])
+        
+        if cluster_indices is None:
+            cluster_indices = list(self.clusters.keys())
+        
+        # First, calculate latencies for each sniff event for sorting
+        n_sniffs = len(self.sniff_times)
+        latencies = np.full(n_sniffs, np.inf)
+        
+        # Calculate latencies across all specified clusters
+        for sniff_idx, sniff_time in enumerate(self.sniff_times):
+            all_post_sniff_spikes = []
+            
+            # Collect post-sniff spikes from all clusters for this sniff
+            for cluster_idx in cluster_indices:
+                if cluster_idx not in self.clusters:
+                    continue
+                
+                spike_times = self.clusters[cluster_idx]['spike_times']
+                start_time = sniff_time - window_ms
+                end_time = sniff_time + window_ms
+                
+                window_spikes = spike_times[(spike_times >= start_time) & (spike_times <= end_time)]
+                relative_times = window_spikes - sniff_time
+                post_sniff_spikes = relative_times[relative_times > 0]
+                
+                all_post_sniff_spikes.extend(post_sniff_spikes)
+            
+            # Calculate mean latency for sorting
+            if len(all_post_sniff_spikes) >= n_spikes_for_sorting:
+                all_post_sniff_spikes = sorted(all_post_sniff_spikes)
+                latencies[sniff_idx] = np.mean(all_post_sniff_spikes[:n_spikes_for_sorting])
+            elif len(all_post_sniff_spikes) > 0:
+                latencies[sniff_idx] = np.mean(all_post_sniff_spikes)
+        
+        # Create sorted order (shortest latency first, inf values at end)
+        valid_latencies = latencies[latencies != np.inf]
+        invalid_indices = np.where(latencies == np.inf)[0]
+        
+        if len(valid_latencies) > 0:
+            valid_indices = np.where(latencies != np.inf)[0]
+            sorted_valid_indices = valid_indices[np.argsort(-latencies[valid_indices])]
+            sorted_sniff_order = sorted_valid_indices#np.concatenate([sorted_valid_indices, invalid_indices])
+        else:
+            sorted_sniff_order = np.arange(n_sniffs)
+        
+        # Now collect scatter data using sorted sniff order
+        all_sniff_indices = []
+        all_relative_times = []
+        all_cluster_ids = []
+        
+        # Process each cluster
+        for cluster_idx in cluster_indices:
+            if cluster_idx not in self.clusters:
+                continue
+                
+            spike_times = self.clusters[cluster_idx]['spike_times']
+            
+            # Process each sniff event in sorted order
+            for new_sniff_idx, original_sniff_idx in enumerate(sorted_sniff_order):
+                sniff_time = self.sniff_times[original_sniff_idx]
+                
+                # Find spikes within the window around this sniff
+                start_time = sniff_time - window_ms
+                end_time = sniff_time + window_ms
+                
+                # Get spikes in window
+                window_spikes = spike_times[(spike_times >= start_time) & (spike_times <= end_time)]
+                
+                if len(window_spikes) > 0:
+                    # Convert to relative times (sniff at 0)
+                    relative_times = window_spikes - sniff_time
+                    
+                    # Add to scatter data (use new sorted index)
+                    all_sniff_indices.extend([new_sniff_idx] * len(relative_times))
+                    all_relative_times.extend(relative_times)
+                    all_cluster_ids.extend([cluster_idx] * len(relative_times))
+        
+        # Convert to numpy arrays
+        sniff_indices = np.array(all_sniff_indices)
+        relative_spike_times = np.array(all_relative_times)
+        cluster_ids = np.array(all_cluster_ids)
+        
+        if self.verbose:
+            print(f"Created scatter data: {len(relative_spike_times)} spikes across "
+                  f"{len(cluster_indices)} clusters and {len(self.sniff_times)} sniff events")
+        
+        return sniff_indices, relative_spike_times, cluster_ids
+    
+    def plot_sniff_locked_scatter(self, cluster_indices: Optional[List[int]] = None,
+                                window_ms: float = 500.0, n_spikes_for_sorting: int = 5,
+                                figsize: Tuple[float, float] = (8, 8)):
+        """
+        Create a scatter plot of sniff-locked spikes.
+        
+        Parameters:
+        -----------
+        cluster_indices : List[int], optional
+            List of cluster indices to include. If None, uses all clusters.
+        window_ms : float
+            Half-window size around sniff events in milliseconds
+        n_spikes_for_sorting : int
+            Number of spikes to average for sorting by latency
+        figsize : Tuple[float, float]
+            Figure size (width, height)
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib required for plotting")
+            return
+        
+        # Get scatter data
+        sniff_indices, relative_times, cluster_ids = self.get_sniff_locked_scatter_data(
+            cluster_indices, window_ms, n_spikes_for_sorting)
+        
+        if len(relative_times) == 0:
+            print("No spike data found for plotting")
+            return
+        
+        # Create plot
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        # If multiple clusters, color by cluster
+        if len(np.unique(cluster_ids)) > 1:
+            scatter = ax.scatter(relative_times, sniff_indices, c=cluster_ids, 
+                               alpha=0.6, s=1, cmap='tab10')
+            plt.colorbar(scatter, label='Cluster ID')
+        else:
+            ax.scatter(relative_times, sniff_indices, alpha=0.05, s=.5, color='k')
+        
+        # Formatting
+        ax.axvline(x=0, color='red', linestyle='--', alpha=0.7)
+        ax.set_xlabel('Time Relative to Sniff (ms)')
+        ax.set_ylabel('Sniff Event Index')
+        ax.set_title(f'Sniff-Locked Spike Raster (±{window_ms}ms window)')
+        ax.grid(False, alpha=0)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        return fig, ax
     
     def __repr__(self) -> str:
         """String representation of SessionData object."""

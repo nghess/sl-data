@@ -14,10 +14,71 @@ Code by Nate Gonzales-Hess, August 2025.
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, roc_curve, auc
+import seaborn as sns
 import torch
 
 from sldata import SessionData
 from neural_classifier import SequenceClassifier, SequenceDataset
+
+
+def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarray, 
+                           y_prob: np.ndarray, model_name: str = "Classifier"):
+    """
+    Create standardized plots for classifier evaluation.
+    
+    Parameters:
+    -----------
+    history : dict
+        Training history with 'train_loss', 'val_loss', 'val_acc'
+    y_true : np.ndarray
+        True labels
+    y_pred : np.ndarray
+        Predicted labels
+    y_prob : np.ndarray
+        Prediction probabilities
+    model_name : str
+        Name of the model for plot titles
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # 1. Training/Validation Loss
+    axes[0].plot(history['train_loss'], label='Training Loss', color='blue')
+    if 'val_loss' in history and len(history['val_loss']) > 0:
+        axes[0].plot(history['val_loss'], label='Validation Loss', color='orange')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].set_title(f'{model_name} - Training History')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    
+    # 2. Confusion Matrix
+    cm = confusion_matrix(y_true, y_pred)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[1])
+    axes[1].set_xlabel('Predicted')
+    axes[1].set_ylabel('True')
+    axes[1].set_title(f'{model_name} - Confusion Matrix')
+    
+    # 3. ROC Curve
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    roc_auc = auc(fpr, tpr)
+    
+    axes[2].plot(fpr, tpr, color='darkorange', lw=2, 
+                label=f'ROC curve (AUC = {roc_auc:.3f})')
+    axes[2].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', 
+                label='Random classifier')
+    axes[2].set_xlim([0.0, 1.0])
+    axes[2].set_ylim([0.0, 1.05])
+    axes[2].set_xlabel('False Positive Rate')
+    axes[2].set_ylabel('True Positive Rate')
+    axes[2].set_title(f'{model_name} - ROC Curve')
+    axes[2].legend(loc="lower right")
+    axes[2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
 
 
 def create_sequences(population_matrix: np.ndarray, labels: np.ndarray, 
@@ -140,67 +201,6 @@ def prepare_lstm_data(session: SessionData, event_column: str,
     return sequences, sequence_labels, time_bins
 
 
-def plot_sequence_examples(sequences: np.ndarray, labels: np.ndarray, 
-                          time_bins: np.ndarray, n_examples: int = 3):
-    """Plot example sequences for visualization."""
-    fig, axes = plt.subplots(n_examples, 2, figsize=(15, 4*n_examples))
-    
-    # Find examples with different labels
-    true_indices = np.where(labels == 1)[0]
-    false_indices = np.where(labels == 0)[0]
-    
-    for i in range(n_examples):
-        # True example
-        if len(true_indices) > i:
-            true_idx = true_indices[i]
-            im1 = axes[i, 0].imshow(sequences[true_idx].T, aspect='auto', cmap='viridis')
-            axes[i, 0].set_title(f'True Label Example {i+1}')
-            axes[i, 0].set_xlabel('Time Bins')
-            axes[i, 0].set_ylabel('Neurons')
-            plt.colorbar(im1, ax=axes[i, 0])
-        
-        # False example
-        if len(false_indices) > i:
-            false_idx = false_indices[i]
-            im2 = axes[i, 1].imshow(sequences[false_idx].T, aspect='auto', cmap='viridis')
-            axes[i, 1].set_title(f'False Label Example {i+1}')
-            axes[i, 1].set_xlabel('Time Bins')
-            axes[i, 1].set_ylabel('Neurons')
-            plt.colorbar(im2, ax=axes[i, 1])
-    
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_lstm_training_history(history: dict):
-    """Plot LSTM training history."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    
-    # Loss plot
-    axes[0].plot(history['train_loss'], label='Training Loss')
-    if 'val_loss' in history and len(history['val_loss']) > 0:
-        axes[0].plot(history['val_loss'], label='Validation Loss')
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Loss')
-    axes[0].set_title('LSTM Training History')
-    axes[0].legend()
-    axes[0].grid(True)
-    
-    # Accuracy plot
-    if 'val_acc' in history and len(history['val_acc']) > 0:
-        axes[1].plot(history['val_acc'], label='Validation Accuracy')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('Accuracy')
-        axes[1].set_title('LSTM Validation Accuracy')
-        axes[1].legend()
-        axes[1].grid(True)
-    else:
-        axes[1].text(0.5, 0.5, 'No validation data', 
-                    transform=axes[1].transAxes, ha='center', va='center')
-        axes[1].set_title('Validation Accuracy')
-    
-    plt.tight_layout()
-    plt.show()
 
 
 def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
@@ -277,10 +277,6 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
         print(f"Warning: Highly imbalanced classes (positive rate: {np.mean(sequence_labels):.3f})")
         print("Consider using different aggregation or event column")
     
-    # Plot example sequences
-    print(f"\n3. Plotting example sequences...")
-    plot_sequence_examples(sequences, sequence_labels, time_bins)
-    
     # Split data
     print(f"\n4. Splitting data (test size: {test_size})...")
     X_train, X_test, y_train, y_test = train_test_split(
@@ -331,12 +327,8 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
         verbose=True
     )
     
-    # Plot training history
-    print(f"\n7. Plotting training history...")
-    plot_lstm_training_history(history)
-    
     # Evaluate model
-    print(f"\n8. Evaluating LSTM model on test set...")
+    print(f"\n7. Evaluating LSTM model on test set...")
     metrics, y_true, y_pred, y_prob = classifier.evaluate(test_dataset)
     
     print("Test Performance:")
@@ -346,33 +338,13 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
     print(f"  F1-score:  {metrics['f1']:.4f}")
     print(f"  AUC:       {metrics['auc']:.4f}")
     
-    # Plot some predictions
-    print(f"\n9. Plotting prediction examples...")
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    axes = axes.ravel()
-    
-    # Show 4 random test examples
-    random_indices = np.random.choice(len(y_true), 4, replace=False)
-    
-    for i, idx in enumerate(random_indices):
-        # Get the corresponding sequence
-        test_seq = X_test[idx]
-        true_label = y_true[idx]
-        pred_prob = y_prob[idx]
-        
-        # Plot the sequence
-        im = axes[i].imshow(test_seq.T, aspect='auto', cmap='viridis')
-        axes[i].set_title(f'True: {int(true_label)}, Pred: {pred_prob:.3f}')
-        axes[i].set_xlabel('Time Bins')
-        axes[i].set_ylabel('Neurons')
-        plt.colorbar(im, ax=axes[i])
-    
-    plt.tight_layout()
-    plt.show()
-    
     print("\n" + "="*60)
     print("LSTM DEMO COMPLETE!")
     print("="*60)
+    
+    # Create comprehensive plots after training is complete
+    print(f"\n8. Generating evaluation plots...")
+    plot_classifier_results(history, y_true, y_pred, y_prob, "LSTM Classifier")
     
     return classifier, metrics, history
 
@@ -389,8 +361,8 @@ if __name__ == "__main__":
         bin_size_ms=100.0,   # 100ms bins
         stride=5,            # 5 bin stride (50% overlap)
         test_size=0.2,
-        epochs=500,
+        epochs=250,
         hidden_size=64,
-        num_layers=2,
+        num_layers=3,
         bidirectional=False
     )

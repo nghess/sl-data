@@ -15,10 +15,71 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, roc_curve, auc
+import seaborn as sns
 import torch
 
 from sldata import SessionData
 from neural_classifier import PopulationClassifier, PopulationDataset
+
+
+def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarray, 
+                           y_prob: np.ndarray, model_name: str = "Classifier"):
+    """
+    Create standardized plots for classifier evaluation.
+    
+    Parameters:
+    -----------
+    history : dict
+        Training history with 'train_loss', 'val_loss', 'val_acc'
+    y_true : np.ndarray
+        True labels
+    y_pred : np.ndarray
+        Predicted labels
+    y_prob : np.ndarray
+        Prediction probabilities
+    model_name : str
+        Name of the model for plot titles
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # 1. Training/Validation Loss
+    axes[0].plot(history['train_loss'], label='Training Loss', color='blue')
+    if 'val_loss' in history and len(history['val_loss']) > 0:
+        axes[0].plot(history['val_loss'], label='Validation Loss', color='orange')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].set_title(f'{model_name} - Training History')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    
+    # 2. Confusion Matrix
+    cm = confusion_matrix(y_true, y_pred)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[1])
+    axes[1].set_xlabel('Predicted')
+    axes[1].set_ylabel('True')
+    axes[1].set_title(f'{model_name} - Confusion Matrix')
+    
+    # 3. ROC Curve
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    roc_auc = auc(fpr, tpr)
+    
+    axes[2].plot(fpr, tpr, color='darkorange', lw=2, 
+                label=f'ROC curve (AUC = {roc_auc:.3f})')
+    axes[2].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', 
+                label='Random classifier')
+    axes[2].set_xlim([0.0, 1.0])
+    axes[2].set_ylim([0.0, 1.05])
+    axes[2].set_xlabel('False Positive Rate')
+    axes[2].set_ylabel('True Positive Rate')
+    axes[2].set_title(f'{model_name} - ROC Curve')
+    axes[2].legend(loc="lower right")
+    axes[2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
 
 
 def prepare_classification_data(session: SessionData, event_column: str, 
@@ -81,68 +142,6 @@ def prepare_classification_data(session: SessionData, event_column: str,
     return population_matrix, labels, time_bins
 
 
-def plot_training_history(history: dict):
-    """Plot training history."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    
-    # Loss plot
-    axes[0].plot(history['train_loss'], label='Training Loss')
-    if 'val_loss' in history and len(history['val_loss']) > 0:
-        axes[0].plot(history['val_loss'], label='Validation Loss')
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Loss')
-    axes[0].set_title('Training History')
-    axes[0].legend()
-    axes[0].grid(True)
-    
-    # Accuracy plot
-    if 'val_acc' in history and len(history['val_acc']) > 0:
-        axes[1].plot(history['val_acc'], label='Validation Accuracy')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('Accuracy')
-        axes[1].set_title('Validation Accuracy')
-        axes[1].legend()
-        axes[1].grid(True)
-    else:
-        axes[1].text(0.5, 0.5, 'No validation data', 
-                    transform=axes[1].transAxes, ha='center', va='center')
-        axes[1].set_title('Validation Accuracy')
-    
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_classification_results(true_labels: np.ndarray, predicted_labels: np.ndarray, 
-                              probabilities: np.ndarray, time_bins: np.ndarray):
-    """Plot classification results over time."""
-    fig, axes = plt.subplots(3, 1, figsize=(15, 8))
-    
-    # True labels
-    axes[0].plot(time_bins / 1000, true_labels, 'k-', alpha=0.7, label='True Labels')
-    axes[0].set_ylabel('True State')
-    axes[0].set_title('Classification Results Over Time')
-    axes[0].grid(True)
-    axes[0].legend()
-    
-    # Predicted probabilities
-    axes[1].plot(time_bins / 1000, probabilities, 'b-', alpha=0.7, label='Predicted Probability')
-    axes[1].axhline(y=0.5, color='r', linestyle='--', alpha=0.5, label='Decision Threshold')
-    axes[1].set_ylabel('Probability')
-    axes[1].set_ylim(0, 1)
-    axes[1].grid(True)
-    axes[1].legend()
-    
-    # Comparison
-    axes[2].plot(time_bins / 1000, true_labels, 'k-', alpha=0.7, label='True')
-    axes[2].plot(time_bins / 1000, predicted_labels, 'r-', alpha=0.7, label='Predicted')
-    axes[2].set_xlabel('Time (s)')
-    axes[2].set_ylabel('State')
-    axes[2].set_title('True vs Predicted')
-    axes[2].grid(True)
-    axes[2].legend()
-    
-    plt.tight_layout()
-    plt.show()
 
 
 def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
@@ -248,12 +247,8 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
         verbose=True
     )
     
-    # Plot training history
-    print(f"\n6. Plotting training history...")
-    plot_training_history(history)
-    
     # Evaluate model
-    print(f"\n7. Evaluating model on test set...")
+    print(f"\n6. Evaluating model on test set...")
     metrics, y_true, y_pred, y_prob = classifier.evaluate(test_dataset)
     
     print("Test Performance:")
@@ -263,16 +258,13 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
     print(f"  F1-score:  {metrics['f1']:.4f}")
     print(f"  AUC:       {metrics['auc']:.4f}")
     
-    # Plot results for test set
-    test_indices = np.arange(len(X_test))
-    test_time_bins = time_bins[test_indices]  # This is approximate
-    
-    print(f"\n8. Plotting classification results...")
-    plot_classification_results(y_true, y_pred, y_prob, test_time_bins)
-    
     print("\n" + "="*60)
     print("DEMO COMPLETE!")
     print("="*60)
+    
+    # Create comprehensive plots after training is complete
+    print(f"\n7. Generating evaluation plots...")
+    plot_classifier_results(history, y_true, y_pred, y_prob, "MLP Classifier")
     
     return classifier, metrics, history
 
@@ -287,5 +279,5 @@ if __name__ == "__main__":
         base_path="S:\\",
         bin_size_ms=100.0,
         test_size=0.2,
-        epochs=1000
+        epochs=250
     )
