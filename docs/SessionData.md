@@ -291,24 +291,6 @@ The class provides robust error handling:
 - **Filtering**: Creates shallow copies where possible to minimize memory usage
 - **Path Search**: Targeted searching within experiment directories for speed
 
-## Migration Guide
-
-When moving to a new project:
-
-1. Copy `session_data.py` to your new project directory
-2. Update import statements as needed
-3. Adjust `base_path` parameter for your data location
-4. Modify `experiment` parameter to match your directory structure
-
-## Future Extensions
-
-The class is designed for easy extension:
-
-- Add new signal types by extending `_process_signals()`
-- Add new cluster metrics by modifying cluster processing
-- Extend filtering with custom operators
-- Add new population analysis methods
-
 ## License
 
 This code is provided as-is for research purposes. Please credit Nate Gonzales-Hess if used in publications.

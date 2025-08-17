@@ -104,30 +104,6 @@ ob_session = session.filter_clusters('best_channel > 16')
 active_session = session.filter_clusters('n_spikes >= 200')
 ```
 
-## Repository Structure
-
-```
-sl-data/
-├── src/sldata/              # Core library package
-│   ├── __init__.py         # Package initialization
-│   ├── SessionData.py      # Main SessionData class
-│   └── behavior_utils.py   # Behavioral data utilities
-├── examples/               # Example scripts and demos
-│   ├── classification_demo.py  # MLP classification demo
-│   ├── lstm_demo.py           # LSTM sequence classification
-│   ├── neural_classifier.py  # Classifier implementations
-│   └── cuda_test.py          # CUDA functionality test
-├── tests/                  # Unit tests
-│   ├── __init__.py
-│   └── test_session_data.py
-├── docs/                   # Documentation
-│   ├── SessionData.md
-│   └── neural_classifiers_guide.md
-├── notebooks/              # Jupyter notebooks
-├── pyproject.toml         # Package configuration
-└── README.md              # This file
-```
-
 ## Examples
 
 ### Running Classification Demos
@@ -206,15 +182,6 @@ pytest tests/
 pytest --cov=sldata tests/
 ```
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Run tests and ensure they pass
-6. Submit a pull request
-
 ## License
 
 MIT License - see LICENSE file for details.
@@ -230,5 +197,4 @@ Gonzales-Hess, N. (2025). sldata: A Python library for preprocessed neural spike
 ## Contact
 
 - Author: Nate Gonzales-Hess
-- Email: nate.gonzales.hess@gmail.com
-- Issues: https://github.com/your-username/sl-data/issues
+- Email: nhess [at] uoregon [dot] edu

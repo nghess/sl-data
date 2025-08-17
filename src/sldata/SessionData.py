@@ -12,6 +12,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional, Dict, Tuple, Union, List
 from scipy.stats import zscore
+from scipy import signal
 from scipy.signal import find_peaks
 import os
 import operator
@@ -79,6 +80,7 @@ class SessionData:
         self.raw_data = {}
         self.n_clusters = 0
         self.events = pd.DataFrame()
+        self.duration = np.int32()
 
         # Initialize signal traces
         self.sniff = np.array([])
@@ -91,6 +93,7 @@ class SessionData:
         self._load_events_data()
         self._process_clusters()
         self._process_signals()
+        self.find_sniff_peaks(prominence=1000, distance=50)
         
         if verbose:
             print(f"Loaded {self.n_clusters} clusters for {mouse_id}_{session_id}")
@@ -233,6 +236,7 @@ class SessionData:
         
         try:
             self.events = pd.read_csv(events_path)
+            self.duration = (self.events['timestamp_ms'].iloc[-1] - self.events['timestamp_ms'].iloc[0])
             if self.verbose:
                 print(f"Successfully loaded events from {events_path}")
         except Exception as e:
@@ -658,6 +662,32 @@ class SessionData:
             self.sniff_times = np.array([])
             return self.sniff_times
         
+        # Determine effective sampling rate after any processing
+        effective_sampling_rate = self.sampling_rate
+        
+        # Check if sniff signal needs filtering and decimation
+        if len(self.sniff) > self.duration * 1.5:  # Signal is at higher sample rate than milliseconds
+            if self.verbose:
+                print("Filtering and decimating sniff signal from 30kHz to 1kHz...")
+            
+            # Apply 60Hz notch filter
+            b, a = signal.iirnotch(60, 10, 30_000)
+            self.sniff = signal.filtfilt(b, a, self.sniff)
+            
+            # Apply low-pass filter (20Hz cutoff)
+            sos = signal.butter(3, 40, 'low', fs=30_000, output='sos')
+            self.sniff = signal.sosfiltfilt(sos, self.sniff)
+            
+            # Remove DC offset
+            self.sniff -= np.median(self.sniff)
+            
+            # Decimate by factor of 30 (30kHz -> 1kHz)
+            self.sniff = signal.decimate(self.sniff, 30)
+            self.sniff = self.sniff.astype(np.int16)
+            
+            # Update effective sampling rate
+            effective_sampling_rate = 1000.0
+        
         # Build parameters dictionary for find_peaks
         peak_params = {}
         if height is not None:
@@ -672,8 +702,8 @@ class SessionData:
         # Find peaks in the sniff signal
         peak_indices, _ = find_peaks(self.sniff, **peak_params)
         
-        # Convert peak indices to times in milliseconds
-        self.sniff_times = peak_indices * (1000.0 / self.sampling_rate)
+        # Convert peak indices to times in milliseconds using correct sampling rate
+        self.sniff_times = peak_indices * (1000.0 / effective_sampling_rate)
         
         if self.verbose:
             print(f"Found {len(self.sniff_times)} peaks in sniff signal")
@@ -715,20 +745,6 @@ class SessionData:
         end_sample = min(len(self.sniff), end_sample)
         
         return self.sniff[start_sample:end_sample]
-    
-    def get_sniff_times(self) -> np.ndarray:
-        """
-        Get time vector for sniff data in milliseconds.
-        
-        Returns:
-        --------
-        times : np.ndarray
-            Time vector in milliseconds
-        """
-        if len(self.sniff) == 0:
-            return np.array([])
-        
-        return np.arange(len(self.sniff)) * (1000.0 / self.sampling_rate)
     
     def has_sniff_data(self) -> bool:
         """
