@@ -78,7 +78,7 @@ class PopulationMLP(nn.Module):
         self.network = nn.Sequential(*layers)
         
     def forward(self, x):
-        return self.network(x).squeeze()
+        return self.network(x).squeeze(-1)  # Only squeeze the last dimension, preserve batch dim
 
 
 class PopulationClassifier:
@@ -107,7 +107,7 @@ class PopulationClassifier:
         
     def train_model(self, train_data: PopulationDataset, val_data: Optional[PopulationDataset] = None,
                    epochs: int = 100, batch_size: int = 32, learning_rate: float = 0.001,
-                   verbose: bool = True) -> dict:
+                   verbose: bool = True, use_best_model: bool = False) -> dict:
         """
         Train the classifier.
         
@@ -137,6 +137,10 @@ class PopulationClassifier:
         val_loader = DataLoader(val_data, batch_size=batch_size) if val_data else None
         
         history = {'train_loss': [], 'val_loss': [], 'val_acc': []}
+        
+        # Best model tracking
+        best_val_loss = float('inf')
+        best_model_state = None
         
         for epoch in range(epochs):
             # Training
@@ -183,6 +187,11 @@ class PopulationClassifier:
                 history['val_loss'].append(val_loss)
                 history['val_acc'].append(val_acc)
                 
+                # Save best model based on validation loss
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_state = self.model.state_dict().copy()
+                
                 if verbose and (epoch + 1) % 10 == 0:
                     print(f"Epoch {epoch+1}/{epochs} - "
                           f"Train Loss: {train_loss:.4f}, "
@@ -191,6 +200,21 @@ class PopulationClassifier:
             else:
                 if verbose and (epoch + 1) % 10 == 0:
                     print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}")
+        
+        # Restore best model if validation was used and use_best_model is True
+        if best_model_state is not None and use_best_model:
+            self.model.load_state_dict(best_model_state)
+            # Find the epoch with best validation loss
+            best_epoch = history['val_loss'].index(best_val_loss)
+            history['best_epoch'] = best_epoch
+            if verbose:
+                print(f"Restored best model from epoch {best_epoch + 1} with val_loss = {best_val_loss:.4f}")
+        elif best_model_state is not None:
+            # Still track best epoch for plotting, but don't restore
+            best_epoch = history['val_loss'].index(best_val_loss)
+            history['best_epoch'] = best_epoch
+            if verbose:
+                print(f"Using final model (epoch {epochs}). Best val_loss was at epoch {best_epoch + 1} = {best_val_loss:.4f}")
         
         return history
     
@@ -363,7 +387,7 @@ class PopulationLSTM(nn.Module):
         # Classify based on final hidden state
         output = self.classifier(final_hidden)
         
-        return output.squeeze()
+        return output.squeeze(-1)  # Only squeeze the last dimension, preserve batch dim
 
 
 class SequenceClassifier:
@@ -398,7 +422,7 @@ class SequenceClassifier:
         
     def train_model(self, train_data: SequenceDataset, val_data: Optional[SequenceDataset] = None,
                    epochs: int = 100, batch_size: int = 32, learning_rate: float = 0.001,
-                   verbose: bool = True) -> dict:
+                   verbose: bool = True, use_best_model: bool = False) -> dict:
         """
         Train the sequence classifier.
         
@@ -428,6 +452,10 @@ class SequenceClassifier:
         val_loader = DataLoader(val_data, batch_size=batch_size) if val_data else None
         
         history = {'train_loss': [], 'val_loss': [], 'val_acc': []}
+        
+        # Best model tracking
+        best_val_loss = float('inf')
+        best_model_state = None
         
         for epoch in range(epochs):
             # Training
@@ -474,6 +502,11 @@ class SequenceClassifier:
                 history['val_loss'].append(val_loss)
                 history['val_acc'].append(val_acc)
                 
+                # Save best model based on validation loss
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_state = self.model.state_dict().copy()
+                
                 if verbose and (epoch + 1) % 10 == 0:
                     print(f"Epoch {epoch+1}/{epochs} - "
                           f"Train Loss: {train_loss:.4f}, "
@@ -482,6 +515,21 @@ class SequenceClassifier:
             else:
                 if verbose and (epoch + 1) % 10 == 0:
                     print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}")
+        
+        # Restore best model if validation was used and use_best_model is True
+        if best_model_state is not None and use_best_model:
+            self.model.load_state_dict(best_model_state)
+            # Find the epoch with best validation loss
+            best_epoch = history['val_loss'].index(best_val_loss)
+            history['best_epoch'] = best_epoch
+            if verbose:
+                print(f"Restored best model from epoch {best_epoch + 1} with val_loss = {best_val_loss:.4f}")
+        elif best_model_state is not None:
+            # Still track best epoch for plotting, but don't restore
+            best_epoch = history['val_loss'].index(best_val_loss)
+            history['best_epoch'] = best_epoch
+            if verbose:
+                print(f"Using final model (epoch {epochs}). Best val_loss was at epoch {best_epoch + 1} = {best_val_loss:.4f}")
         
         return history
     

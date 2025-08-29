@@ -246,6 +246,35 @@ def process_events(idx, event_paths_a, event_paths_b, columns: dict):
     event_data['speed'] = calculate_speed(event_data)
     event_data['direction'] = calculate_direction(event_data)
     
+    # Rebuild 'reward_state' as periods between click onset and poke events
+    # reward_state = True from when 'click' goes False->True until either 'poke_left' or 'poke_right' goes False->True
+    
+    reward_state = np.zeros(len(event_data), dtype=bool)
+    
+    # Find click transitions from False to True
+    click_onsets = np.where((event_data['click'].shift(1) == False) & 
+                           (event_data['click'] == True))[0]
+    
+    # Find poke transitions from False to True (either left or right)
+    poke_left_onsets = np.where((event_data['poke_left'].shift(1) == False) & 
+                               (event_data['poke_left'] == True))[0]
+    poke_right_onsets = np.where((event_data['poke_right'].shift(1) == False) & 
+                                (event_data['poke_right'] == True))[0]
+    
+    # Combine and sort all poke onsets
+    all_poke_onsets = np.sort(np.concatenate([poke_left_onsets, poke_right_onsets]))
+    
+    # For each click onset, find the next poke onset and mark the period as reward_state
+    for click_idx in click_onsets:
+        # Find the next poke onset after this click onset
+        next_pokes = all_poke_onsets[all_poke_onsets > click_idx]
+        if len(next_pokes) > 0:
+            poke_idx = next_pokes[0]
+            # Mark reward_state period from click onset to poke onset
+            reward_state[click_idx:poke_idx] = True
+    
+    event_data['reward_state'] = reward_state
+    
     # Add 'drinking' column (period between reward initiation poke and start of ITI)
     event_data['drinking'] = calculate_drinking(event_data)
 

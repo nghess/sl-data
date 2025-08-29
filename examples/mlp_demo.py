@@ -15,7 +15,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import confusion_matrix, roc_curve, auc
+from sklearn.metrics import confusion_matrix, precision_recall_curve, average_precision_score
 import seaborn as sns
 import torch
 
@@ -47,6 +47,14 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     axes[0].plot(history['train_loss'], label='Training Loss', color='blue')
     if 'val_loss' in history and len(history['val_loss']) > 0:
         axes[0].plot(history['val_loss'], label='Validation Loss', color='orange')
+        
+        # Mark the best epoch if available
+        if 'best_epoch' in history:
+            best_epoch = history['best_epoch']
+            best_val_loss = history['val_loss'][best_epoch]
+            axes[0].scatter(best_epoch, best_val_loss, color='red', s=100, 
+                           marker='*', zorder=5, label=f'Best Model (Epoch {best_epoch + 1})')
+    
     axes[0].set_xlabel('Epoch')
     axes[0].set_ylabel('Loss')
     axes[0].set_title(f'{model_name} - Training History')
@@ -55,25 +63,42 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     
     # 2. Confusion Matrix
     cm = confusion_matrix(y_true, y_pred)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[1])
+    
+    # Calculate accuracy percentages for each cell
+    cm_percentages = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
+    
+    # Create custom annotations with counts and percentages
+    annotations = []
+    for i in range(cm.shape[0]):
+        row = []
+        for j in range(cm.shape[1]):
+            count = cm[i, j]
+            percentage = cm_percentages[i, j]
+            row.append(f'{count}\n({percentage:.1f}%)')
+        annotations.append(row)
+    
+    sns.heatmap(cm, annot=annotations, fmt='', cmap='Blues', ax=axes[1])
     axes[1].set_xlabel('Predicted')
     axes[1].set_ylabel('True')
     axes[1].set_title(f'{model_name} - Confusion Matrix')
     
-    # 3. ROC Curve
-    fpr, tpr, _ = roc_curve(y_true, y_prob)
-    roc_auc = auc(fpr, tpr)
+    # 3. Precision-Recall Curve
+    precision, recall, _ = precision_recall_curve(y_true, y_prob)
+    avg_precision = average_precision_score(y_true, y_prob)
     
-    axes[2].plot(fpr, tpr, color='darkorange', lw=2, 
-                label=f'ROC curve (AUC = {roc_auc:.3f})')
-    axes[2].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', 
-                label='Random classifier')
+    # Calculate baseline (random classifier performance)
+    baseline_precision = np.sum(y_true) / len(y_true)
+    
+    axes[2].plot(recall, precision, color='darkorange', lw=2, 
+                label=f'PR curve (AP = {avg_precision:.3f})')
+    axes[2].axhline(y=baseline_precision, color='navy', lw=2, linestyle='--', 
+                   label=f'Random classifier (AP = {baseline_precision:.3f})')
     axes[2].set_xlim([0.0, 1.0])
     axes[2].set_ylim([0.0, 1.05])
-    axes[2].set_xlabel('False Positive Rate')
-    axes[2].set_ylabel('True Positive Rate')
-    axes[2].set_title(f'{model_name} - ROC Curve')
-    axes[2].legend(loc="lower right")
+    axes[2].set_xlabel('Recall (TP/(TP+FN))')
+    axes[2].set_ylabel('Precision (TP/(TP+FP))')
+    axes[2].set_title(f'{model_name} - Precision-Recall Curve')
+    axes[2].legend(loc="lower left")
     axes[2].grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -85,7 +110,8 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
 def prepare_classification_data(session: SessionData, event_column: str, 
                               bin_size_ms: float = 50.0, 
                               min_time_ms: float = 0,
-                              max_time_ms: float = None) -> tuple:
+                              max_time_ms: float = None,
+                              centroid_y_threshold: float = None) -> tuple:
     """
     Prepare data for classification from SessionData.
     
@@ -101,15 +127,18 @@ def prepare_classification_data(session: SessionData, event_column: str,
         Start time for analysis
     max_time_ms : float
         End time for analysis (if None, uses session duration)
+    centroid_y_threshold : float, optional
+        If provided, only include time bins where centroid_y <= threshold.
+        If None, uses 50% of max centroid_y value.
         
     Returns:
     --------
     population_matrix : np.ndarray
-        Population activity matrix [time_bins x neurons]
+        Population activity matrix [time_bins x neurons] - filtered by centroid_y
     labels : np.ndarray
-        Binary labels for each time bin
+        Binary labels for each time bin - filtered by centroid_y
     time_bins : np.ndarray
-        Time bin centers
+        Time bin centers - filtered by centroid_y
     """
     print(f"Preparing data for predicting '{event_column}'...")
     
@@ -134,8 +163,35 @@ def prepare_classification_data(session: SessionData, event_column: str,
         aggregation='any'  # True if any event in time bin is True
     )
     
-    print(f"Data shape: {population_matrix.shape}")
-    print(f"Labels shape: {labels.shape}")
+    # Apply centroid_y filtering if requested
+    if 'centroid_y' in session.events.columns:
+        # Get centroid_y values for each time bin
+        centroid_y_values = session.create_event_colormap(
+            time_bins,
+            'centroid_y',
+            aggregation='mean'  # Use mean centroid_y for each time bin
+        )
+        
+        # Determine threshold
+        if centroid_y_threshold is None:
+            max_centroid_y = session.events['centroid_y'].max()
+            centroid_y_threshold = max_centroid_y * 0.5
+        
+        # Create mask for time bins below threshold
+        centroid_mask = centroid_y_values <= centroid_y_threshold
+        
+        # Apply filtering
+        population_matrix = population_matrix[centroid_mask]
+        labels = labels[centroid_mask]
+        time_bins = time_bins[centroid_mask]
+        
+        print(f"Applied centroid_y filter (≤{centroid_y_threshold:.1f}): "
+              f"kept {np.sum(centroid_mask)}/{len(centroid_mask)} time bins")
+    else:
+        print("Warning: No 'centroid_y' column found in events data - skipping position filtering")
+    
+    print(f"Final data shape: {population_matrix.shape}")
+    print(f"Final labels shape: {labels.shape}")
     print(f"Positive class proportion: {np.mean(labels):.3f}")
     print(f"Time range: {time_bins[0]:.1f} - {time_bins[-1]:.1f} ms")
     
@@ -149,7 +205,10 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
                           base_path: str = "S:\\",
                           bin_size_ms: float = 50.0,
                           test_size: float = 0.2,
-                          epochs: int = 100):
+                          epochs: int = 100,
+                          centroid_y_threshold: float = None,
+                          use_best_model: bool = False,
+                          cluster_filter: str = None):
     """
     Run complete classification demo.
     
@@ -171,6 +230,15 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
         Fraction of data for testing
     epochs : int
         Number of training epochs
+    centroid_y_threshold : float, optional
+        Only include time bins where centroid_y <= threshold.
+        If None, uses 50% of max centroid_y value.
+    use_best_model : bool
+        If True, use the model with best validation loss for testing.
+        If False, use the final model after all epochs (default).
+    cluster_filter : str, optional
+        Filter expression for clusters (same syntax as SessionData.filter_clusters()).
+        If None, uses all clusters. Examples: 'best_channel >= 17', 'n_spikes > 100'.
     """
     print("="*60)
     print("NEURAL POPULATION CLASSIFICATION DEMO")
@@ -192,34 +260,115 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
         print(f"Available columns: {list(session.events.columns)}")
         return
     
+    # Apply cluster filtering if specified
+    if cluster_filter is not None:
+        print(f"\n2. Filtering clusters with: {cluster_filter}")
+        
+        original_n_clusters = session.n_clusters
+        session = session.filter_clusters(cluster_filter)
+        
+        print(f"  Original clusters: {original_n_clusters}")
+        print(f"  Filtered clusters: {session.n_clusters}")
+        
+        if session.n_clusters == 0:
+            print(f"Error: No clusters found matching: {cluster_filter}")
+            return
+    
     # Prepare classification data
-    print(f"\n2. Preparing classification data...")
+    step_num = 3 if cluster_filter is not None else 2
+    print(f"\n{step_num}. Preparing classification data...")
     population_matrix, labels, time_bins = prepare_classification_data(
-        session, event_column, bin_size_ms
+        session, event_column, bin_size_ms, centroid_y_threshold=centroid_y_threshold
     )
     
-    # Check for class balance
+    # Check for class balance and diagnose potential issues
+    print(f"\n=== Class Balance Diagnostics ===")
+    print(f"Original events dataframe:")
+    if event_column in session.events.columns:
+        original_pos_rate = session.events[event_column].mean()
+        print(f"  {event_column} positive rate: {original_pos_rate:.3f}")
+        print(f"  {event_column} total events: {len(session.events)}")
+    
+    print(f"After time binning and filtering:")
+    print(f"  Time bin positive rate: {np.mean(labels):.3f}")
+    print(f"  Total time bins: {len(labels)}")
+    print(f"  Positive time bins: {np.sum(labels)}")
+    print(f"  Negative time bins: {len(labels) - np.sum(labels)}")
+    
     if np.mean(labels) < 0.01 or np.mean(labels) > 0.99:
         print(f"Warning: Highly imbalanced classes (positive rate: {np.mean(labels):.3f})")
         print("Consider using different aggregation or event column")
     
-    # Split data
-    print(f"\n3. Splitting data (test size: {test_size})...")
-    X_train, X_test, y_train, y_test = train_test_split(
-        population_matrix, labels, test_size=test_size, 
-        random_state=42, stratify=labels
-    )
+    # Stratified temporal block split to maintain class balance while avoiding data leakage
+    print(f"\n4. Stratified temporal block splitting (test size: {test_size})...")
+    n_samples = len(population_matrix)
+    
+    # Create temporal blocks (e.g., 10 blocks) and sample from each
+    n_blocks = 10
+    block_size = n_samples // n_blocks
+    
+    # Initialize split arrays
+    train_indices = []
+    val_indices = []
+    test_indices = []
+    
+    # For each temporal block, stratify the split
+    for block_idx in range(n_blocks):
+        start_idx = block_idx * block_size
+        end_idx = (block_idx + 1) * block_size if block_idx < n_blocks - 1 else n_samples
+        
+        block_samples = np.arange(start_idx, end_idx)
+        block_labels = labels[start_idx:end_idx]
+        
+        # Skip blocks with no variation
+        if len(np.unique(block_labels)) < 2:
+            # All same class - distribute proportionally
+            n_test = int(len(block_samples) * test_size)
+            n_val = int(len(block_samples) * 0.16)  # 20% of remaining 80%
+            
+            test_indices.extend(block_samples[-n_test:])
+            val_indices.extend(block_samples[-(n_test+n_val):-n_test])
+            train_indices.extend(block_samples[:-(n_test+n_val)])
+        else:
+            # Stratified split within block
+            from sklearn.model_selection import train_test_split
+            
+            block_train, block_temp = train_test_split(
+                block_samples, test_size=test_size + 0.16, random_state=42, 
+                stratify=block_labels
+            )
+            block_val, block_test = train_test_split(
+                block_temp, test_size=test_size/(test_size + 0.16), random_state=42,
+                stratify=block_labels[block_temp - start_idx]
+            )
+            
+            train_indices.extend(block_train)
+            val_indices.extend(block_val)
+            test_indices.extend(block_test)
+    
+    # Create splits using indices
+    train_indices = np.array(train_indices)
+    val_indices = np.array(val_indices)
+    test_indices = np.array(test_indices)
+    
+    X_train = population_matrix[train_indices]
+    y_train = labels[train_indices]
+    
+    X_val = population_matrix[val_indices] 
+    y_val = labels[val_indices]
+    
+    X_test = population_matrix[test_indices]
+    y_test = labels[test_indices]
     
     # Create datasets
     train_dataset = PopulationDataset(X_train, y_train)
+    val_dataset = PopulationDataset(X_val, y_val)
     test_dataset = PopulationDataset(X_test, y_test)
     
-    # Split training data for validation
-    X_train_sub, X_val, y_train_sub, y_val = train_test_split(
-        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
-    )
-    train_dataset = PopulationDataset(X_train_sub, y_train_sub)
-    val_dataset = PopulationDataset(X_val, y_val)
+    print(f"Stratified temporal block split:")
+    print(f"  Training: {len(train_dataset)} samples, {np.mean(y_train):.3f} positive")
+    print(f"  Validation: {len(val_dataset)} samples, {np.mean(y_val):.3f} positive") 
+    print(f"  Test: {len(test_dataset)} samples, {np.mean(y_test):.3f} positive")
     
     print(f"Training set: {len(train_dataset)} samples")
     print(f"Validation set: {len(val_dataset)} samples") 
@@ -234,21 +383,21 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
     
     classifier = PopulationClassifier(
         input_size=n_neurons,
-        hidden_sizes=[128, 64],
-        dropout_rate=0.2,
+        hidden_sizes=[16,8,8],
+        dropout_rate=0.3,
         device=device
     )
     
     # Train model
-    print(f"\n5. Training model for {epochs} epochs...")
+    print(f"\n5. Training MLP model for {epochs} epochs...")
     history = classifier.train_model(
         train_dataset, val_dataset,
-        epochs=epochs, batch_size=32, learning_rate=0.001,
-        verbose=True
+        epochs=epochs, batch_size=16, learning_rate=0.0001,
+        verbose=True, use_best_model=use_best_model
     )
     
     # Evaluate model
-    print(f"\n6. Evaluating model on test set...")
+    print(f"\n6. Evaluating MLP model on test set...")
     metrics, y_true, y_pred, y_prob = classifier.evaluate(test_dataset)
     
     print("Test Performance:")
@@ -259,7 +408,7 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
     print(f"  AUC:       {metrics['auc']:.4f}")
     
     print("\n" + "="*60)
-    print("DEMO COMPLETE!")
+    print("MLP DEMO COMPLETE!")
     print("="*60)
     
     # Create comprehensive plots after training is complete
@@ -270,14 +419,17 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
 
 
 if __name__ == "__main__":
-    # Example usage - modify these parameters for your data
+    # Example usage - optimized for neural data with cluster filtering
     run_classification_demo(
-        mouse_id="7003",
+        mouse_id="7004",
         session_id="m4", 
         experiment="clickbait-motivate",
-        event_column="click",
+        event_column="flip_state",
         base_path="S:\\",
-        bin_size_ms=100.0,
+        bin_size_ms=1000.0,                   # Coarser temporal resolution
         test_size=0.2,
-        epochs=250
+        epochs=1000,                          # Training epochs
+        centroid_y_threshold=np.inf,         # No position filtering
+        use_best_model=False,                # Use final model by default
+        cluster_filter='best_channel < 17'  # Only use channels 17 and above
     )
