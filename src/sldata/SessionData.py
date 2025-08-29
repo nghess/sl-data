@@ -18,6 +18,8 @@ import os
 import operator
 import copy
 
+from sldata.behavior_utils import get_file_paths
+
 
 class SessionData:
     """
@@ -71,6 +73,7 @@ class SessionData:
         self.session_id = session_id
         self.experiment = experiment
         self.base_path = base_path
+        self.video_path = get_file_paths(f"{base_path}/{experiment}", 'avi', f"{mouse_id}_{session_id}", session_type='', print_paths=False)[0]
         self.sampling_rate = sampling_rate
         self.min_spikes = min_spikes
         self.verbose = verbose
