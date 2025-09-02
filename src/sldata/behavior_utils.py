@@ -26,11 +26,12 @@ def natural_sort_key(path):
             for text in re.split('([0-9]+)', path_str)]
 
 # Get all files matching extension and keyword in a directory and its subdirectories
-def get_file_paths(directory: str = '', extension: str = '', keyword: str = '', session_type: str = '', print_paths=False, print_n=np.inf) -> list:
+def get_file_paths(directory: str = '', extension: str = '', keyword: str = '', session_type: str = '', print_paths=False, print_n=np.inf, verbose=True) -> list:
     paths = [f for f in Path(directory).glob(f'**/{session_type}*/*.{extension}') if keyword in f.name]
     # Sort paths using natural sorting
     paths = sorted(paths, key=natural_sort_key)
-    print(f'Found {len(paths)} {keyword}.{extension} files')
+    if verbose:
+        print(f'Found {len(paths)} {keyword}.{extension} files')
     if print_paths:
             show_paths(paths, print_n)
     return paths

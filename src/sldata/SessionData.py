@@ -14,6 +14,7 @@ from typing import Optional, Dict, Tuple, Union, List
 from scipy.stats import zscore
 from scipy import signal
 from scipy.signal import find_peaks
+import cv2
 import os
 import operator
 import copy
@@ -73,7 +74,8 @@ class SessionData:
         self.session_id = session_id
         self.experiment = experiment
         self.base_path = base_path
-        self.video_path = get_file_paths(f"{base_path}/{experiment}", 'avi', f"{mouse_id}_{session_id}", session_type='', print_paths=False)[0]
+        self.video_path = get_file_paths(f"{base_path}/{experiment}", 'avi', f"{mouse_id}_{session_id}", session_type='', print_paths=False, verbose=False)[0]
+        self.video = cv2.VideoCapture()
         self.sampling_rate = sampling_rate
         self.min_spikes = min_spikes
         self.verbose = verbose
@@ -95,6 +97,7 @@ class SessionData:
         # Load the data
         self._load_ephys_data()
         self._load_events_data()
+        self._load_video()
         self._process_clusters()
         self._process_signals()
         self.find_sniff_peaks(prominence=1000, distance=50)
@@ -144,6 +147,22 @@ class SessionData:
         if self.verbose:
             print(f"Warning: {target_filename} not found for {self.mouse_id}/{self.session_id} in {search_dir}")
         return None
+    
+    def _load_video(self):
+        # Load video
+        self.video = cv2.VideoCapture(f"{self.video_path}")
+
+        #  Video properties
+        self.fps = self.video.get(cv2.CAP_PROP_FPS)
+        self.width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.total_frames = int(self.video.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Get offset between video and event data start
+        self.video_offset = self.total_frames - len(self.events)
+
+        print(f"Video properties: {self.width}x{self.height}, {self.fps} FPS, {self.total_frames} frames")
+
 
     def _load_ephys_data(self):
         """Load preprocessed neural data files."""
