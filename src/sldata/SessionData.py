@@ -1422,6 +1422,11 @@ class SessionData:
         
         return fig, ax
     
+    def plot_trajectory(self):
+        # Create plot
+        fig, ax = plt.subplots(figsize=(self.width, self.height))
+        
+    
     def __repr__(self) -> str:
         """String representation of SessionData object."""
         return f"SessionData({self.mouse_id}_{self.session_id}, {self.n_clusters} clusters)"

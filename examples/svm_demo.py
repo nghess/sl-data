@@ -1,27 +1,219 @@
 """
-Demo script for LSTM-based neural population sequence classification.
+Demo script for SVM-based neural population sequence classification.
 
 This script demonstrates how to:
 1. Load neural data using SessionData
 2. Create population activity sequences 
 3. Prepare behavioral event labels for sequences
-4. Train an LSTM classifier
+4. Train an SVM classifier
 5. Evaluate model performance
 
-Code by Nate Gonzales-Hess, August 2025.
+Code by Nate Gonzales-Hess, September 2025.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, precision_recall_curve, average_precision_score
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
 import seaborn as sns
-import torch
 import copy
 import pandas as pd
+from typing import Tuple, Dict, Optional
+import time
 
 from sldata import SessionData
-from neural_classifier import SequenceClassifier, SequenceDataset
+
+
+class SVMClassifier:
+    """
+    SVM wrapper for neural sequence classification with interface similar to SequenceClassifier.
+    """
+    
+    def __init__(self, kernel: str = 'rbf', C: float = 1.0, gamma: str = 'scale',
+                 class_weight: str = 'balanced', random_state: int = 42):
+        """
+        Initialize SVM classifier.
+        
+        Parameters:
+        -----------
+        kernel : str
+            SVM kernel type ('rbf', 'linear', 'poly', 'sigmoid')
+        C : float
+            Regularization parameter
+        gamma : str or float
+            Kernel coefficient for 'rbf', 'poly' and 'sigmoid'
+        class_weight : str or dict
+            Class weights for handling imbalanced data
+        random_state : int
+            Random seed for reproducible results
+        """
+        self.kernel = kernel
+        self.C = C
+        self.gamma = gamma
+        self.class_weight = class_weight
+        self.random_state = random_state
+        
+        self.model = None
+        self.scaler = StandardScaler()
+        self.best_params = None
+        self.history = {}
+        
+    def _flatten_sequences(self, X: np.ndarray) -> np.ndarray:
+        """
+        Flatten sequence data for SVM input.
+        
+        Parameters:
+        -----------
+        X : np.ndarray
+            Input sequences [n_samples, sequence_length, n_features]
+            
+        Returns:
+        --------
+        X_flat : np.ndarray
+            Flattened features [n_samples, sequence_length * n_features]
+        """
+        n_samples, seq_len, n_features = X.shape
+        return X.reshape(n_samples, seq_len * n_features)
+    
+    def train_model(self, train_X: np.ndarray, train_y: np.ndarray,
+                   val_X: np.ndarray = None, val_y: np.ndarray = None,
+                   use_grid_search: bool = True, verbose: bool = True) -> Dict:
+        """
+        Train SVM model with optional hyperparameter tuning.
+        
+        Parameters:
+        -----------
+        train_X : np.ndarray
+            Training sequences [n_samples, sequence_length, n_features]
+        train_y : np.ndarray
+            Training labels [n_samples]
+        val_X : np.ndarray, optional
+            Validation sequences (for reporting, not used in training)
+        val_y : np.ndarray, optional
+            Validation labels (for reporting, not used in training)
+        use_grid_search : bool
+            Whether to use grid search for hyperparameter tuning
+        verbose : bool
+            Whether to print training progress
+            
+        Returns:
+        --------
+        history : dict
+            Training history (for compatibility with LSTM interface)
+        """
+        if verbose:
+            print("Training SVM classifier...")
+            
+        start_time = time.time()
+        
+        # Flatten sequences for SVM
+        X_train_flat = self._flatten_sequences(train_X)
+        
+        # Scale features
+        X_train_scaled = self.scaler.fit_transform(X_train_flat)
+        
+        if use_grid_search:
+            if verbose:
+                print("Performing grid search for hyperparameter tuning...")
+                
+            # Define parameter grid
+            param_grid = {
+                'C': [0.1, 1, 10, 100],
+                'gamma': ['scale', 'auto', 0.001, 0.01, 0.1, 1],
+                'kernel': ['rbf', 'linear']
+            }
+            
+            # Perform grid search with cross-validation
+            self.model = GridSearchCV(
+                SVC(class_weight=self.class_weight, random_state=self.random_state, probability=True),
+                param_grid, cv=5, scoring='roc_auc', n_jobs=-1, verbose=0
+            )
+            self.model.fit(X_train_scaled, train_y)
+            
+            self.best_params = self.model.best_params_
+            if verbose:
+                print(f"Best parameters: {self.best_params}")
+                print(f"Best CV score: {self.model.best_score_:.4f}")
+        else:
+            # Train with specified parameters
+            self.model = SVC(
+                kernel=self.kernel, C=self.C, gamma=self.gamma,
+                class_weight=self.class_weight, random_state=self.random_state,
+                probability=True
+            )
+            self.model.fit(X_train_scaled, train_y)
+        
+        training_time = time.time() - start_time
+        
+        # Create history dict for compatibility
+        self.history = {
+            'training_time': training_time,
+            'train_accuracy': self.model.score(X_train_scaled, train_y),
+            'best_params': self.best_params if use_grid_search else None
+        }
+        
+        # Add validation metrics if provided
+        if val_X is not None and val_y is not None:
+            X_val_flat = self._flatten_sequences(val_X)
+            X_val_scaled = self.scaler.transform(X_val_flat)
+            self.history['val_accuracy'] = self.model.score(X_val_scaled, val_y)
+        
+        if verbose:
+            print(f"Training completed in {training_time:.2f} seconds")
+            print(f"Training accuracy: {self.history['train_accuracy']:.4f}")
+            if 'val_accuracy' in self.history:
+                print(f"Validation accuracy: {self.history['val_accuracy']:.4f}")
+        
+        return self.history
+    
+    def evaluate(self, test_X: np.ndarray, test_y: np.ndarray) -> Tuple[Dict, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Evaluate model on test data.
+        
+        Parameters:
+        -----------
+        test_X : np.ndarray
+            Test sequences [n_samples, sequence_length, n_features]
+        test_y : np.ndarray
+            Test labels [n_samples]
+            
+        Returns:
+        --------
+        metrics : dict
+            Evaluation metrics
+        y_true : np.ndarray
+            True labels
+        y_pred : np.ndarray
+            Predicted labels
+        y_prob : np.ndarray
+            Prediction probabilities
+        """
+        if self.model is None:
+            raise ValueError("Model must be trained before evaluation")
+        
+        # Flatten and scale test data
+        X_test_flat = self._flatten_sequences(test_X)
+        X_test_scaled = self.scaler.transform(X_test_flat)
+        
+        # Make predictions
+        y_pred = self.model.predict(X_test_scaled)
+        y_prob = self.model.predict_proba(X_test_scaled)[:, 1]  # Probability of positive class
+        
+        # Calculate metrics
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+        
+        metrics = {
+            'accuracy': accuracy_score(test_y, y_pred),
+            'precision': precision_score(test_y, y_pred, zero_division=0),
+            'recall': recall_score(test_y, y_pred, zero_division=0),
+            'f1': f1_score(test_y, y_pred, zero_division=0),
+            'auc': roc_auc_score(test_y, y_prob) if len(np.unique(test_y)) > 1 else 0.0
+        }
+        
+        return metrics, test_y, y_pred, y_prob
 
 
 def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarray, 
@@ -33,7 +225,7 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     Parameters:
     -----------
     history : dict
-        Training history with 'train_loss', 'val_loss', 'val_acc'
+        Training history with metrics
     y_true : np.ndarray
         True labels
     y_pred : np.ndarray
@@ -43,25 +235,30 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     model_name : str
         Name of the model for plot titles
     """
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     
-    # 1. Training/Validation Loss
-    axes[0].plot(history['train_loss'], label='Training Loss', color='blue')
-    if 'val_loss' in history and len(history['val_loss']) > 0:
-        axes[0].plot(history['val_loss'], label='Validation Loss', color='orange')
-        
-        # Mark the best epoch if available
-        if 'best_epoch' in history:
-            best_epoch = history['best_epoch']
-            best_val_loss = history['val_loss'][best_epoch]
-            axes[0].scatter(best_epoch, best_val_loss, color='red', s=100, 
-                           marker='*', zorder=5, label=f'Best Model (Epoch {best_epoch + 1})')
+    # 1. Training Summary (replace loss plot)
+    train_acc = history.get('train_accuracy', 0)
+    val_acc = history.get('val_accuracy', None)
+    training_time = history.get('training_time', 0)
     
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Loss')
-    axes[0].set_title(f"{mouse_id}-{session_id} {model_name} Predicting '{event_column}'")
-    axes[0].legend()
-    axes[0].grid(False)
+    # Show training summary as text
+    summary_text = f"Training Accuracy: {train_acc:.4f}\n"
+    if val_acc is not None:
+        summary_text += f"Validation Accuracy: {val_acc:.4f}\n"
+    summary_text += f"Training Time: {training_time:.2f}s\n"
+    
+    if 'best_params' in history and history['best_params']:
+        summary_text += "\nBest Parameters:\n"
+        for param, value in history['best_params'].items():
+            summary_text += f"  {param}: {value}\n"
+    
+    axes[0,0].text(0.1, 0.5, summary_text, transform=axes[0,0].transAxes, fontsize=12,
+                   verticalalignment='center', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+    axes[0,0].set_xlim(0, 1)
+    axes[0,0].set_ylim(0, 1)
+    axes[0,0].set_title(f"{mouse_id}-{session_id} {model_name} Predicting '{event_column}'")
+    axes[0,0].axis('off')
     
     # 2. Confusion Matrix
     cm = confusion_matrix(y_true, y_pred)
@@ -79,11 +276,11 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
             row.append(f'{count}\n({percentage:.1f}%)')
         annotations.append(row)
     
-    sns.heatmap(cm_percentages, annot=annotations, fmt='', cmap='Blues', ax=axes[1], cbar=False)
-    axes[1].set_xlabel('Predicted')
-    axes[1].set_ylabel('True')
-    axes[1].set_title(f'Best Model - Confusion Matrix')
-    axes[1].set_aspect('equal')
+    sns.heatmap(cm_percentages, annot=annotations, fmt='', cmap='Blues', ax=axes[0,1], cbar=False)
+    axes[0,1].set_xlabel('Predicted')
+    axes[0,1].set_ylabel('True')
+    axes[0,1].set_title(f'{model_name} - Confusion Matrix')
+    axes[0,1].set_aspect('equal')
     
     # 3. Precision-Recall Curve
     precision, recall, _ = precision_recall_curve(y_true, y_prob)
@@ -92,18 +289,39 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     # Calculate baseline (random classifier performance)
     baseline_precision = np.sum(y_true) / len(y_true)
     
-    axes[2].plot(recall, precision, color='darkorange', lw=2, 
-                label=f'PR curve (AP = {avg_precision:.3f})')
-    axes[2].axhline(y=baseline_precision, color='navy', lw=2, linestyle='--', 
-                   label=f'Random classifier (AP = {baseline_precision:.3f})')
-    axes[2].set_xlim([0.0, 1.0])
-    axes[2].set_ylim([0.0, 1.05])
-    axes[2].set_xlabel('Recall (TP/(TP+FN))')
-    axes[2].set_ylabel('Precision (TP/(TP+FP))')
-    axes[2].set_title(f'Best Model - Precision-Recall Curve')
-    axes[2].legend(loc="lower left")
-    axes[2].grid(False)
-    axes[2].set_aspect('equal')
+    axes[1,0].plot(recall, precision, color='darkorange', lw=2, 
+                   label=f'PR curve (AP = {avg_precision:.3f})')
+    axes[1,0].axhline(y=baseline_precision, color='navy', lw=2, linestyle='--', 
+                     label=f'Random classifier (AP = {baseline_precision:.3f})')
+    axes[1,0].set_xlim([0.0, 1.0])
+    axes[1,0].set_ylim([0.0, 1.05])
+    axes[1,0].set_xlabel('Recall (TP/(TP+FN))')
+    axes[1,0].set_ylabel('Precision (TP/(TP+FP))')
+    axes[1,0].set_title(f'{model_name} - Precision-Recall Curve')
+    axes[1,0].legend(loc="lower left")
+    axes[1,0].grid(False)
+    axes[1,0].set_aspect('equal')
+    
+    # 4. ROC Curve
+    from sklearn.metrics import roc_curve, auc
+    
+    # Calculate ROC curve and AUC
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    roc_auc = auc(fpr, tpr)
+    
+    # Plot ROC curve
+    axes[1,1].plot(fpr, tpr, color='darkorange', lw=2,
+                   label=f'ROC curve (AUC = {roc_auc:.3f})')
+    axes[1,1].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--',
+                   label='Random classifier (AUC = 0.500)')
+    axes[1,1].set_xlim([0.0, 1.0])
+    axes[1,1].set_ylim([0.0, 1.05])
+    axes[1,1].set_xlabel('False Positive Rate (1-Specificity)')
+    axes[1,1].set_ylabel('True Positive Rate (Sensitivity)')
+    axes[1,1].set_title(f'{model_name} - ROC Curve')
+    axes[1,1].legend(loc="lower right")
+    axes[1,1].grid(False)
+    axes[1,1].set_aspect('equal')
     
     plt.tight_layout()
     plt.show()
@@ -555,7 +773,7 @@ def create_sequences(population_matrix: np.ndarray, labels: np.ndarray,
     return sequences, sequence_labels
 
 
-def prepare_lstm_data(session: SessionData, event_column: str, 
+def prepare_svm_data(session: SessionData, event_column: str, 
                      sequence_length: int = 10,
                      bin_size_ms: float = 50.0, 
                      stride: int = 1,
@@ -564,7 +782,7 @@ def prepare_lstm_data(session: SessionData, event_column: str,
                      centroid_y_threshold: float = None,
                      filter_boundaries: bool = False) -> tuple:
     """
-    Prepare sequence data for LSTM classification from SessionData.
+    Prepare sequence data for SVM classification from SessionData.
     
     Parameters:
     -----------
@@ -597,7 +815,7 @@ def prepare_lstm_data(session: SessionData, event_column: str,
     time_bins : np.ndarray
         Time bin centers - filtered by centroid_y
     """
-    print(f"Preparing LSTM data for predicting '{event_column}'...")
+    print(f"Preparing SVM data for predicting '{event_column}'...")
     
     # Create population matrix
     if max_time_ms is None:
@@ -664,21 +882,18 @@ def prepare_lstm_data(session: SessionData, event_column: str,
     return sequences, sequence_labels, time_bins
 
 
-
-
-def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
+def run_svm_demo(mouse_id: str, session_id: str, experiment: str,
                  event_column: str = 'flip_state',
                  base_path: str = "S:\\",
                  sequence_length: int = 10,
                  bin_size_ms: float = 50.0,
                  stride: int = 5,
                  test_size: float = 0.2,
-                 epochs: int = 50,
-                 hidden_size: int = 64,
-                 num_layers: int = 2,
-                 bidirectional: bool = False,
+                 kernel: str = 'rbf',
+                 C: float = 1.0,
+                 gamma: str = 'scale',
+                 use_grid_search: bool = True,
                  centroid_y_threshold: float = None,
-                 use_best_model: bool = False,
                  cluster_filter: str = None,
                  exclude_final_flip: bool = False,
                  filter_boundaries: bool = False,
@@ -687,7 +902,7 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
                  val_size: float = 0.2,
                  random_state: int = 42):
     """
-    Run complete LSTM classification demo.
+    Run complete SVM classification demo.
     
     Parameters:
     -----------
@@ -709,17 +924,17 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
         Stride between sequences
     test_size : float
         Fraction of data for testing
-    epochs : int
-        Number of training epochs
-    hidden_size : int
-        LSTM hidden state size
-    num_layers : int
-        Number of LSTM layers
-    bidirectional : bool
-        Whether to use bidirectional LSTM
-    use_best_model : bool
-        If True, use the model with best validation loss for testing.
-        If False, use the final model after all epochs (default).
+    kernel : str
+        SVM kernel type ('rbf', 'linear', 'poly', 'sigmoid')
+    C : float
+        SVM regularization parameter
+    gamma : str or float
+        SVM kernel coefficient
+    use_grid_search : bool
+        Whether to use grid search for hyperparameter tuning
+    centroid_y_threshold : float, optional
+        Only include time bins where centroid_y <= threshold.
+        If None, uses 50% of max centroid_y value.
     cluster_filter : str, optional
         Filter expression for clusters (same syntax as SessionData.filter_clusters()).
         If None, uses all clusters. Examples: 'best_channel >= 17', 'n_spikes > 100'.
@@ -741,7 +956,7 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
         Random seed for reproducible trial-based splits (default: 42).
     """
     print("="*60)
-    print("LSTM NEURAL POPULATION CLASSIFICATION DEMO")
+    print("SVM NEURAL POPULATION CLASSIFICATION DEMO")
     print("="*60)
     
     # Load session data
@@ -800,7 +1015,7 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
     # Prepare sequence data
     step_num = 4 if exclude_final_flip else (3 if cluster_filter is not None else 2)
     print(f"\n{step_num}. Preparing sequence data...")
-    sequences, sequence_labels, time_bins = prepare_lstm_data(
+    sequences, sequence_labels, time_bins = prepare_svm_data(
         session, event_column, sequence_length, bin_size_ms, stride, 
         centroid_y_threshold=centroid_y_threshold, filter_boundaries=filter_boundaries
     )
@@ -825,7 +1040,7 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
     
     # Choose splitting method based on use_trial_split parameter
     if use_trial_split:
-        print(f"\n4. Trial-based splitting (train: {train_size:.1f}, val: {val_size:.1f}, test: {1-train_size-val_size:.1f})...")
+        print(f"\n{step_num+1}. Trial-based splitting (train: {train_size:.1f}, val: {val_size:.1f}, test: {1-train_size-val_size:.1f})...")
         
         # Use trial-based splitting
         train_indices, val_indices, test_indices, trial_assignments = create_trial_based_split(
@@ -837,79 +1052,24 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
         print(f"  Trial assignments: {len(trial_assignments['train'])} train, {len(trial_assignments['val'])} val, {len(trial_assignments['test'])} test trials")
         
     else:
-        print(f"\n4. Stratified temporal block splitting (test size: {test_size})...")
+        print(f"\n{step_num+1}. Simple train/val/test splitting (test size: {test_size})...")
         n_sequences = len(sequences)
         
-        # Create temporal blocks and sample from each to ensure full coverage
-        n_blocks = 10
-        block_size = n_sequences // n_blocks
+        # Simple sequential split for SVM (since training is faster than LSTM)
+        n_test = int(n_sequences * test_size)
+        n_val = int(n_sequences * 0.16)  # 16% for validation
         
-        print(f"Creating {n_blocks} temporal blocks from {n_sequences} sequences:")
-        print(f"  Block size: {block_size} sequences per block")
+        # Take test from end, validation from middle, train from beginning
+        test_indices = np.arange(n_sequences - n_test, n_sequences)
+        val_indices = np.arange(n_sequences - n_test - n_val, n_sequences - n_test)
+        train_indices = np.arange(0, n_sequences - n_test - n_val)
         
-        # Initialize split arrays
-        train_indices = []
-        val_indices = []
-        test_indices = []
-        
-        # For each temporal block, stratify the split
-        for block_idx in range(n_blocks):
-            start_idx = block_idx * block_size
-            end_idx = (block_idx + 1) * block_size if block_idx < n_blocks - 1 else n_sequences
-            
-            block_sequences = np.arange(start_idx, end_idx)
-            block_labels = sequence_labels[start_idx:end_idx]
-            
-            print(f"  Block {block_idx}: sequences {start_idx}-{end_idx-1} ({len(block_sequences)} sequences, {np.mean(block_labels):.3f} positive)")
-            
-            # Check if we can stratify this block
-            unique_labels, label_counts = np.unique(block_labels, return_counts=True)
-            min_class_size = np.min(label_counts)
-            
-            # Need at least 3 samples per class for stratified split (train/val/test)
-            if len(unique_labels) < 2 or min_class_size < 3:
-                # Can't stratify - distribute proportionally
-                print(f"    Block {block_idx}: Can't stratify (min class size: {min_class_size}), using proportional split")
-                n_test = max(1, int(len(block_sequences) * test_size))
-                n_val = max(1, int(len(block_sequences) * 0.16))  # 20% of remaining 80%
-                
-                test_indices.extend(block_sequences[-n_test:])
-                val_indices.extend(block_sequences[-(n_test+n_val):-n_test] if n_test+n_val < len(block_sequences) else [])
-                train_indices.extend(block_sequences[:-(n_test+n_val)] if n_test+n_val < len(block_sequences) else block_sequences[:-n_test])
-            else:
-                # Stratified split within block
-                from sklearn.model_selection import train_test_split
-                
-                try:
-                    block_train, block_temp = train_test_split(
-                        block_sequences, test_size=test_size + 0.16, random_state=42, 
-                        stratify=block_labels
-                    )
-                    block_val, block_test = train_test_split(
-                        block_temp, test_size=test_size/(test_size + 0.16), random_state=42,
-                        stratify=block_labels[block_temp - start_idx]
-                    )
-                    
-                    train_indices.extend(block_train)
-                    val_indices.extend(block_val)
-                    test_indices.extend(block_test)
-                    print(f"    Block {block_idx}: Stratified split successful")
-                    
-                except ValueError as e:
-                    # Fallback to proportional if stratification fails
-                    print(f"    Block {block_idx}: Stratification failed ({e}), using proportional split")
-                    n_test = max(1, int(len(block_sequences) * test_size))
-                    n_val = max(1, int(len(block_sequences) * 0.16))
-                    
-                    test_indices.extend(block_sequences[-n_test:])
-                    val_indices.extend(block_sequences[-(n_test+n_val):-n_test] if n_test+n_val < len(block_sequences) else [])
-                    train_indices.extend(block_sequences[:-(n_test+n_val)] if n_test+n_val < len(block_sequences) else block_sequences[:-n_test])
-        
-        # Create splits using indices
-        train_indices = np.array(train_indices)
-        val_indices = np.array(val_indices)
-        test_indices = np.array(test_indices)
+        print(f"Sequential split:")
+        print(f"  Training: {len(train_indices)} sequences")
+        print(f"  Validation: {len(val_indices)} sequences")
+        print(f"  Test: {len(test_indices)} sequences")
     
+    # Create splits
     X_train = sequences[train_indices]
     y_train = sequence_labels[train_indices]
     
@@ -919,50 +1079,10 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
     X_test = sequences[test_indices]
     y_test = sequence_labels[test_indices]
     
-    # Create datasets
-    train_dataset = SequenceDataset(X_train, y_train)
-    val_dataset = SequenceDataset(X_val, y_val)
-    test_dataset = SequenceDataset(X_test, y_test)
-    
-    print(f"Stratified temporal block split:")
-    print(f"  Training: {len(train_dataset)} sequences, {np.mean(y_train):.3f} positive")
-    print(f"  Validation: {len(val_dataset)} sequences, {np.mean(y_val):.3f} positive") 
-    print(f"  Test: {len(test_dataset)} sequences, {np.mean(y_test):.3f} positive")
-    
-    # Check for overlapping sequences between splits
-    print(f"\n=== Sequence Overlap Analysis ===")
-    def get_time_bins_for_sequences(seq_indices, stride, sequence_length):
-        """Get all time bin indices covered by sequences"""
-        time_bin_set = set()
-        for seq_idx in seq_indices:
-            start_bin = seq_idx * stride
-            end_bin = start_bin + sequence_length
-            time_bin_set.update(range(start_bin, end_bin))
-        return time_bin_set
-    
-    train_time_bins = get_time_bins_for_sequences(train_indices, stride, sequence_length)
-    val_time_bins = get_time_bins_for_sequences(val_indices, stride, sequence_length)
-    test_time_bins = get_time_bins_for_sequences(test_indices, stride, sequence_length)
-    
-    # Check overlaps
-    train_val_overlap = len(train_time_bins & val_time_bins)
-    train_test_overlap = len(train_time_bins & test_time_bins)
-    val_test_overlap = len(val_time_bins & test_time_bins)
-    
-    print(f"Time bin overlaps between splits:")
-    print(f"  Train-Val overlap: {train_val_overlap} bins")
-    print(f"  Train-Test overlap: {train_test_overlap} bins") 
-    print(f"  Val-Test overlap: {val_test_overlap} bins")
-    
-    if train_val_overlap > 0 or train_test_overlap > 0 or val_test_overlap > 0:
-        print(f"⚠️ WARNING: Data leakage detected! Overlapping time bins between splits.")
-        print(f"   Consider increasing stride or using non-overlapping sequence approach.")
-    else:
-        print(f"✅ No time bin overlaps detected between splits.")
-    
-    print(f"Training set: {len(train_dataset)} sequences")
-    print(f"Validation set: {len(val_dataset)} sequences") 
-    print(f"Test set: {len(test_dataset)} sequences")
+    print(f"Final split:")
+    print(f"  Training: {len(X_train)} sequences, {np.mean(y_train):.3f} positive")
+    print(f"  Validation: {len(X_val)} sequences, {np.mean(y_val):.3f} positive") 
+    print(f"  Test: {len(X_test)} sequences, {np.mean(y_test):.3f} positive")
     
     # Plot timeline with data splits
     print(f"\nGenerating timeline visualization...")
@@ -1006,37 +1126,36 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
                               mouse_id=mouse_id, session_id=session_id, 
                               show_trial_boundaries=use_trial_split)
     
-    # Initialize LSTM classifier
-    print(f"\n5. Initializing LSTM classifier...")
+    # Initialize SVM classifier
+    print(f"\n{step_num+2}. Initializing SVM classifier...")
     n_neurons = sequences.shape[2]
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
     print(f"Input size: {n_neurons} neurons")
     print(f"Sequence length: {sequence_length} time bins")
-    print(f"Hidden size: {hidden_size}")
-    print(f"Num layers: {num_layers}")
-    print(f"Bidirectional: {bidirectional}")
+    print(f"Flattened feature size: {sequence_length * n_neurons}")
+    print(f"Kernel: {kernel}")
+    print(f"C: {C}")
+    print(f"Gamma: {gamma}")
+    print(f"Grid search: {use_grid_search}")
     
-    classifier = SequenceClassifier(
-        input_size=n_neurons,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        dropout_rate=0.7,
-        bidirectional=bidirectional,
-        device=device
+    classifier = SVMClassifier(
+        kernel=kernel,
+        C=C,
+        gamma=gamma,
+        class_weight='balanced',
+        random_state=random_state
     )
     
     # Train model
-    print(f"\n6. Training LSTM model for {epochs} epochs...")
+    print(f"\n{step_num+3}. Training SVM model...")
     history = classifier.train_model(
-        train_dataset, val_dataset,
-        epochs=epochs, batch_size=16, learning_rate=0.0001,
-        verbose=True, use_best_model=use_best_model
+        X_train, y_train, X_val, y_val,
+        use_grid_search=use_grid_search,
+        verbose=True
     )
     
     # Evaluate model
-    print(f"\n7. Evaluating LSTM model on test set...")
-    metrics, y_true, y_pred, y_prob = classifier.evaluate(test_dataset)
+    print(f"\n{step_num+4}. Evaluating SVM model on test set...")
+    metrics, y_true, y_pred, y_prob = classifier.evaluate(X_test, y_test)
     
     print("Test Performance:")
     print(f"  Accuracy:  {metrics['accuracy']:.4f}")
@@ -1046,35 +1165,34 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
     print(f"  AUC:       {metrics['auc']:.4f}")
     
     print("\n" + "="*60)
-    print("LSTM DEMO COMPLETE!")
+    print("SVM DEMO COMPLETE!")
     print("="*60)
     
     # Create comprehensive plots after training is complete
-    print(f"\n8. Generating evaluation plots...")
-    plot_classifier_results(history, y_true, y_pred, y_prob, "LSTM Classifier", mouse_id, session_id, event_column)
+    print(f"\n{step_num+5}. Generating evaluation plots...")
+    plot_classifier_results(history, y_true, y_pred, y_prob, "SVM Classifier", mouse_id, session_id, event_column)
     
     return classifier, metrics, history
 
 
 if __name__ == "__main__":
     # Example usage - optimized for neural data with cluster filtering
-    run_lstm_demo(
+    run_svm_demo(
         mouse_id="7004",
-        session_id="m4", 
-        experiment="clickbait-motivate",
+        session_id="o3", 
+        experiment="clickbait-odor",
         event_column="flip_state",
         base_path="S:\\",
         sequence_length=10,  # Number of time bins per sequence
         bin_size_ms=500,  # Coarser temporal resolution  
         stride=10,  # Dense sampling
         test_size=0.2,
-        epochs=1000,  # Training epochs
-        hidden_size=16,  # Small hidden size to discourage overfitting
-        num_layers=2,  # Depth of network
-        bidirectional=True,
-        use_best_model=True,  # Use best validation model
+        kernel='rbf',  # SVM kernel
+        C=1.0,  # Regularization parameter
+        gamma='scale',  # Kernel coefficient
+        use_grid_search=True,  # Use grid search for hyperparameter tuning
         centroid_y_threshold=np.inf,  # Y-axis halfway point = 1968//2
-        #cluster_filter='best_channel >= 16',  # Filter by cluster attribute
+        cluster_filter='best_channel > 16',  # Filter by cluster attribute
         exclude_final_flip=False,  # Exclude final flip_state period
         filter_boundaries=False,  # Set to True to skip boundary-crossing sequences
         use_trial_split=True,  # Use trial-based splitting for better temporal structure

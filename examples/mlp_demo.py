@@ -18,6 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix, precision_recall_curve, average_precision_score
 import seaborn as sns
 import torch
+import copy
 
 from sldata import SessionData
 from neural_classifier import PopulationClassifier, PopulationDataset
@@ -100,6 +101,145 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     axes[2].set_title(f'{model_name} - Precision-Recall Curve')
     axes[2].legend(loc="lower left")
     axes[2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
+
+
+def plot_data_splits_timeline(session: SessionData, event_column: str, time_bins: np.ndarray, 
+                              train_indices: np.ndarray, val_indices: np.ndarray, 
+                              test_indices: np.ndarray, bin_size_ms: float, labels: np.ndarray = None):
+    """
+    Plot timeline showing event_column over time with train/val/test split overlays.
+    
+    Parameters:
+    -----------
+    session : SessionData
+        Session data containing events
+    event_column : str
+        Column name for the behavioral event 
+    time_bins : np.ndarray
+        Time bin centers used for analysis
+    train_indices, val_indices, test_indices : np.ndarray
+        Indices for each data split
+    bin_size_ms : float
+        Size of time bins in milliseconds
+    labels : np.ndarray, optional
+        Labels for time bins (for showing positive/negative)
+    """
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
+    
+    # Convert event times to seconds for plotting
+    event_times_s = session.events['timestamp_ms'] / 1000
+    time_bins_s = time_bins / 1000
+    
+    # Plot 1: Event state over time
+    event_values = session.events[event_column].astype(int)
+    ax1.fill_between(event_times_s, 0, event_values, alpha=0.7, 
+                     color='blue' if event_values.iloc[0] else 'red',
+                     step='pre', label=f'{event_column}')
+    
+    # Add color changes for flip states
+    flip_changes = np.where(np.diff(event_values))[0]
+    for i, change_idx in enumerate(flip_changes):
+        change_time = event_times_s.iloc[change_idx]
+        next_value = event_values.iloc[change_idx + 1]
+        color = 'blue' if next_value else 'red'
+        
+        # Fill from this change to the next (or end)
+        end_idx = flip_changes[i + 1] if i + 1 < len(flip_changes) else len(event_times_s) - 1
+        end_time = event_times_s.iloc[end_idx]
+        
+        ax1.fill_between(event_times_s.iloc[change_idx:end_idx + 1], 0, 
+                        event_values.iloc[change_idx:end_idx + 1],
+                        alpha=0.7, color=color, step='pre')
+    
+    ax1.set_ylabel(f'{event_column}')
+    ax1.set_title('Behavioral State Over Time')
+    ax1.set_ylim(-0.1, 1.1)
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Data splits overlay with positive/negative labels
+    if labels is not None:
+        # Separate positive and negative time bins for each split
+        train_pos_times = time_bins_s[train_indices][labels[train_indices] == 1]
+        train_neg_times = time_bins_s[train_indices][labels[train_indices] == 0]
+        val_pos_times = time_bins_s[val_indices][labels[val_indices] == 1]
+        val_neg_times = time_bins_s[val_indices][labels[val_indices] == 0]
+        test_pos_times = time_bins_s[test_indices][labels[test_indices] == 1]
+        test_neg_times = time_bins_s[test_indices][labels[test_indices] == 0]
+        
+        # Plot each category
+        height_offset = 0
+        marker_size = 30
+        
+        # Training data
+        if len(train_pos_times) > 0:
+            ax2.scatter(train_pos_times, [0.5 + height_offset] * len(train_pos_times), 
+                       c='darkgreen', marker='o', s=marker_size, alpha=0.8,
+                       label=f'Train Positive ({len(train_pos_times)} bins)')
+        height_offset += 0.08
+        
+        if len(train_neg_times) > 0:
+            ax2.scatter(train_neg_times, [0.5 + height_offset] * len(train_neg_times), 
+                       c='lightgreen', marker='s', s=marker_size, alpha=0.8,
+                       label=f'Train Negative ({len(train_neg_times)} bins)')
+        height_offset += 0.08
+        
+        # Validation data
+        if len(val_pos_times) > 0:
+            ax2.scatter(val_pos_times, [0.5 + height_offset] * len(val_pos_times), 
+                       c='darkorange', marker='o', s=marker_size, alpha=0.8,
+                       label=f'Val Positive ({len(val_pos_times)} bins)')
+        height_offset += 0.08
+        
+        if len(val_neg_times) > 0:
+            ax2.scatter(val_neg_times, [0.5 + height_offset] * len(val_neg_times), 
+                       c='orange', marker='s', s=marker_size, alpha=0.8,
+                       label=f'Val Negative ({len(val_neg_times)} bins)')
+        height_offset += 0.08
+        
+        # Test data
+        if len(test_pos_times) > 0:
+            ax2.scatter(test_pos_times, [0.5 + height_offset] * len(test_pos_times), 
+                       c='darkviolet', marker='o', s=marker_size, alpha=0.8,
+                       label=f'Test Positive ({len(test_pos_times)} bins)')
+        height_offset += 0.08
+        
+        if len(test_neg_times) > 0:
+            ax2.scatter(test_neg_times, [0.5 + height_offset] * len(test_neg_times), 
+                       c='plum', marker='s', s=marker_size, alpha=0.8,
+                       label=f'Test Negative ({len(test_neg_times)} bins)')
+        
+        ax2.set_title('Train/Validation/Test Split Distribution (Positive/Negative Labels)')
+    
+    else:
+        # Fallback to original plotting if labels not provided
+        split_labels = np.full(len(time_bins), 'unused', dtype='U10')
+        split_labels[train_indices] = 'train'
+        split_labels[val_indices] = 'validation'  
+        split_labels[test_indices] = 'test'
+        
+        colors = {'train': 'green', 'validation': 'orange', 'test': 'purple', 'unused': 'gray'}
+        height = 0
+        
+        for split_type, color in colors.items():
+            mask = split_labels == split_type
+            if np.any(mask):
+                times = time_bins_s[mask]
+                ax2.scatter(times, [0.5 + height] * len(times), c=color, alpha=0.7, 
+                           s=50, label=f'{split_type.title()} ({np.sum(mask)} bins)')
+                height += .1
+        
+        ax2.set_title('Train/Validation/Test Split Distribution')
+    
+    ax2.set_ylabel('Data Split')
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylim(0, 1.3)
+    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.show()
@@ -208,7 +348,8 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
                           epochs: int = 100,
                           centroid_y_threshold: float = None,
                           use_best_model: bool = False,
-                          cluster_filter: str = None):
+                          cluster_filter: str = None,
+                          exclude_final_flip: bool = False):
     """
     Run complete classification demo.
     
@@ -239,6 +380,9 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
     cluster_filter : str, optional
         Filter expression for clusters (same syntax as SessionData.filter_clusters()).
         If None, uses all clusters. Examples: 'best_channel >= 17', 'n_spikes > 100'.
+    exclude_final_flip : bool
+        If True, excludes data from the final flip_state period (when mouse less engaged).
+        If False, uses all data (default).
     """
     print("="*60)
     print("NEURAL POPULATION CLASSIFICATION DEMO")
@@ -274,8 +418,31 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
             print(f"Error: No clusters found matching: {cluster_filter}")
             return
     
+    # Apply final flip_state exclusion if requested
+    original_session = session
+    if exclude_final_flip and event_column == 'flip_state':
+        print(f"\n{3 if cluster_filter is not None else 2}. Excluding final flip_state period...")
+        
+        # Find the start of the final flip_state period
+        flip_changes = np.where(np.diff(session.events['flip_state'].astype(int)))[0]
+        if len(flip_changes) > 0:
+            final_flip_start_idx = flip_changes[-1] + 1
+            final_flip_start_time = session.events['timestamp_ms'].iloc[final_flip_start_idx]
+            
+            # Filter events to exclude final flip period
+            mask = session.events['timestamp_ms'] < final_flip_start_time
+            filtered_events = session.events[mask].copy()
+            
+            # Update session events in place (avoid copying cv2.VideoCapture)
+            session.events = filtered_events
+            
+            print(f"  Excluded final flip period starting at {final_flip_start_time:.0f}ms")
+            print(f"  Kept {len(filtered_events)}/{len(original_session.events)} events")
+        else:
+            print("  No flip_state changes found - using all data")
+    
     # Prepare classification data
-    step_num = 3 if cluster_filter is not None else 2
+    step_num = 4 if exclude_final_flip else (3 if cluster_filter is not None else 2)
     print(f"\n{step_num}. Preparing classification data...")
     population_matrix, labels, time_bins = prepare_classification_data(
         session, event_column, bin_size_ms, centroid_y_threshold=centroid_y_threshold
@@ -374,6 +541,11 @@ def run_classification_demo(mouse_id: str, session_id: str, experiment: str,
     print(f"Validation set: {len(val_dataset)} samples") 
     print(f"Test set: {len(test_dataset)} samples")
     
+    # Plot timeline with data splits
+    print(f"\nGenerating timeline visualization...")
+    plot_data_splits_timeline(session, event_column, time_bins, 
+                              train_indices, val_indices, test_indices, bin_size_ms, labels=labels)
+    
     # Initialize classifier
     print(f"\n4. Initializing classifier...")
     n_neurons = population_matrix.shape[1]
@@ -430,6 +602,7 @@ if __name__ == "__main__":
         test_size=0.2,
         epochs=1000,                          # Training epochs
         centroid_y_threshold=np.inf,         # No position filtering
-        use_best_model=False,                # Use final model by default
-        cluster_filter='best_channel < 17'  # Only use channels 17 and above
+        use_best_model=True,                # Use final model by default
+        #cluster_filter='best_channel < 17',  # Only use channels 17 and above
+        exclude_final_flip=False              # Exclude final flip_state period
     )
