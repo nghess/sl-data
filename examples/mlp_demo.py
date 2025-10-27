@@ -42,7 +42,7 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     model_name : str
         Name of the model for plot titles
     """
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     
     # 1. Training/Validation Loss
     axes[0].plot(history['train_loss'], label='Training Loss', color='blue')
@@ -98,9 +98,31 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     axes[2].set_ylim([0.0, 1.05])
     axes[2].set_xlabel('Recall (TP/(TP+FN))')
     axes[2].set_ylabel('Precision (TP/(TP+FP))')
-    axes[2].set_title(f'{model_name} - Precision-Recall Curve')
+    axes[2].set_title('Precision-Recall Curve')
     axes[2].legend(loc="lower left")
     axes[2].grid(True, alpha=0.3)
+    axes[2].set_aspect('equal')
+    
+    # 4. ROC Curve
+    from sklearn.metrics import roc_curve, auc
+    
+    # Calculate ROC curve and AUC
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    roc_auc = auc(fpr, tpr)
+    
+    # Plot ROC curve
+    axes[3].plot(fpr, tpr, color='darkorange', lw=2,
+                 label=f'ROC curve (AUC = {roc_auc:.3f})')
+    axes[3].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--',
+                 label='Random classifier (AUC = 0.500)')
+    axes[3].set_xlim([0.0, 1.0])
+    axes[3].set_ylim([0.0, 1.05])
+    axes[3].set_xlabel('False Positive Rate (1-Specificity)')
+    axes[3].set_ylabel('True Positive Rate (Sensitivity)')
+    axes[3].set_title('ROC Curve')
+    axes[3].legend(loc="lower right")
+    axes[3].grid(True, alpha=0.3)
+    axes[3].set_aspect('equal')
     
     plt.tight_layout()
     plt.show()

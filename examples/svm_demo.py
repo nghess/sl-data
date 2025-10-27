@@ -216,12 +216,13 @@ class SVMClassifier:
         return metrics, test_y, y_pred, y_prob
 
 
-def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarray, 
-                           y_prob: np.ndarray, model_name: str = "Classifier", 
-                           mouse_id: str = "", session_id: str = "", event_column: str = ""):
+def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarray,
+                           y_prob: np.ndarray, model_name: str = "Classifier",
+                           mouse_id: str = "", session_id: str = "", event_column: str = "",
+                           text_size_scale: float = 1.0, show_legends: bool = True):
     """
     Create standardized plots for classifier evaluation.
-    
+
     Parameters:
     -----------
     history : dict
@@ -234,8 +235,12 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
         Prediction probabilities
     model_name : str
         Name of the model for plot titles
+    text_size_scale : float
+        Scale factor for text sizes (default: 1.0)
+    show_legends : bool
+        Whether to show legends on plots (default: True)
     """
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     
     # 1. Training Summary (replace loss plot)
     train_acc = history.get('train_accuracy', 0)
@@ -253,12 +258,12 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
         for param, value in history['best_params'].items():
             summary_text += f"  {param}: {value}\n"
     
-    axes[0,0].text(0.1, 0.5, summary_text, transform=axes[0,0].transAxes, fontsize=12,
-                   verticalalignment='center', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
-    axes[0,0].set_xlim(0, 1)
-    axes[0,0].set_ylim(0, 1)
-    axes[0,0].set_title(f"{mouse_id}-{session_id} {model_name} Predicting '{event_column}'")
-    axes[0,0].axis('off')
+    axes[0].text(0.1, 0.5, summary_text, transform=axes[0].transAxes, fontsize=10*text_size_scale,
+                 verticalalignment='center', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+    axes[0].set_xlim(0, 1)
+    axes[0].set_ylim(0, 1)
+    axes[0].set_title(f"{mouse_id}-{session_id} {model_name}", fontsize=14*text_size_scale)
+    axes[0].axis('off')
     
     # 2. Confusion Matrix
     cm = confusion_matrix(y_true, y_pred)
@@ -276,11 +281,12 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
             row.append(f'{count}\n({percentage:.1f}%)')
         annotations.append(row)
     
-    sns.heatmap(cm_percentages, annot=annotations, fmt='', cmap='Blues', ax=axes[0,1], cbar=False)
-    axes[0,1].set_xlabel('Predicted')
-    axes[0,1].set_ylabel('True')
-    axes[0,1].set_title(f'{model_name} - Confusion Matrix')
-    axes[0,1].set_aspect('equal')
+    sns.heatmap(cm_percentages, annot=annotations, fmt='', cmap='Blues', ax=axes[1], cbar=False, annot_kws={'size': 10*text_size_scale})
+    axes[1].set_xlabel('Predicted', fontsize=12*text_size_scale)
+    axes[1].set_ylabel('True', fontsize=12*text_size_scale)
+    axes[1].set_title('Confusion Matrix', fontsize=14*text_size_scale)
+    axes[1].tick_params(labelsize=10*text_size_scale)
+    axes[1].set_aspect('equal')
     
     # 3. Precision-Recall Curve
     precision, recall, _ = precision_recall_curve(y_true, y_prob)
@@ -289,18 +295,20 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     # Calculate baseline (random classifier performance)
     baseline_precision = np.sum(y_true) / len(y_true)
     
-    axes[1,0].plot(recall, precision, color='darkorange', lw=2, 
-                   label=f'PR curve (AP = {avg_precision:.3f})')
-    axes[1,0].axhline(y=baseline_precision, color='navy', lw=2, linestyle='--', 
-                     label=f'Random classifier (AP = {baseline_precision:.3f})')
-    axes[1,0].set_xlim([0.0, 1.0])
-    axes[1,0].set_ylim([0.0, 1.05])
-    axes[1,0].set_xlabel('Recall (TP/(TP+FN))')
-    axes[1,0].set_ylabel('Precision (TP/(TP+FP))')
-    axes[1,0].set_title(f'{model_name} - Precision-Recall Curve')
-    axes[1,0].legend(loc="lower left")
-    axes[1,0].grid(False)
-    axes[1,0].set_aspect('equal')
+    axes[2].plot(recall, precision, color='darkorange', lw=2, 
+                 label=f'PR curve (AP = {avg_precision:.3f})')
+    axes[2].axhline(y=baseline_precision, color='navy', lw=2, linestyle='--', 
+                   label=f'Random classifier (AP = {baseline_precision:.3f})')
+    axes[2].set_xlim([0.0, 1.0])
+    axes[2].set_ylim([0.0, 1.05])
+    axes[2].set_xlabel('Recall (TP/(TP+FN))', fontsize=12*text_size_scale)
+    axes[2].set_ylabel('Precision (TP/(TP+FP))', fontsize=12*text_size_scale)
+    axes[2].set_title('Precision-Recall Curve', fontsize=14*text_size_scale)
+    if show_legends:
+        axes[2].legend(loc="lower left", fontsize=10*text_size_scale)
+    axes[2].tick_params(labelsize=10*text_size_scale)
+    axes[2].grid(False)
+    axes[2].set_aspect('equal')
     
     # 4. ROC Curve
     from sklearn.metrics import roc_curve, auc
@@ -310,18 +318,20 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     roc_auc = auc(fpr, tpr)
     
     # Plot ROC curve
-    axes[1,1].plot(fpr, tpr, color='darkorange', lw=2,
-                   label=f'ROC curve (AUC = {roc_auc:.3f})')
-    axes[1,1].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--',
-                   label='Random classifier (AUC = 0.500)')
-    axes[1,1].set_xlim([0.0, 1.0])
-    axes[1,1].set_ylim([0.0, 1.05])
-    axes[1,1].set_xlabel('False Positive Rate (1-Specificity)')
-    axes[1,1].set_ylabel('True Positive Rate (Sensitivity)')
-    axes[1,1].set_title(f'{model_name} - ROC Curve')
-    axes[1,1].legend(loc="lower right")
-    axes[1,1].grid(False)
-    axes[1,1].set_aspect('equal')
+    axes[3].plot(fpr, tpr, color='darkorange', lw=2,
+                 label=f'ROC curve (AUC = {roc_auc:.3f})')
+    axes[3].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--',
+                 label='Random classifier (AUC = 0.500)')
+    axes[3].set_xlim([0.0, 1.0])
+    axes[3].set_ylim([0.0, 1.05])
+    axes[3].set_xlabel('False Positive Rate (1-Specificity)', fontsize=12*text_size_scale)
+    axes[3].set_ylabel('True Positive Rate (Sensitivity)', fontsize=12*text_size_scale)
+    axes[3].set_title('ROC Curve', fontsize=14*text_size_scale)
+    if show_legends:
+        axes[3].legend(loc="lower right", fontsize=10*text_size_scale)
+    axes[3].tick_params(labelsize=10*text_size_scale)
+    axes[3].grid(False)
+    axes[3].set_aspect('equal')
     
     plt.tight_layout()
     plt.show()
@@ -329,13 +339,170 @@ def plot_classifier_results(history: dict, y_true: np.ndarray, y_pred: np.ndarra
     return fig
 
 
-def plot_data_splits_timeline(session: SessionData, event_column: str, time_bins: np.ndarray, 
-                              train_indices: np.ndarray, val_indices: np.ndarray, 
-                              test_indices: np.ndarray, bin_size_ms: float, 
-                              sequence_labels: np.ndarray = None, sequence_length: int = None, 
+def plot_temporal_predictions(session: SessionData, event_column: str, time_bins: np.ndarray,
+                             y_true_bins: np.ndarray, y_pred_bins: np.ndarray, y_prob_bins: np.ndarray,
+                             mouse_id: str = "", session_id: str = "", model_name: str = "Classifier",
+                             show_trial_boundaries: bool = False, text_size_scale: float = 1.0,
+                             show_legends: bool = True):
+    """
+    Plot temporal predictions across the session timeline.
+    
+    Shows three subplots:
+    1. True flip state over time
+    2. Predicted binary classifications over time  
+    3. Prediction confidence/probability over time
+    
+    Parameters:
+    -----------
+    session : SessionData
+        Session data containing events
+    event_column : str
+        Column name for the behavioral event
+    time_bins : np.ndarray
+        Time bin centers used for analysis
+    y_true_bins : np.ndarray
+        True labels for each time bin
+    y_pred_bins : np.ndarray
+        Predicted labels for each time bin
+    y_prob_bins : np.ndarray
+        Prediction probabilities for each time bin
+    mouse_id : str
+        Mouse identifier for plot title
+    session_id : str
+        Session identifier for plot title
+    model_name : str
+        Model name for plot title
+    show_trial_boundaries : bool
+        Whether to show trial boundaries as vertical lines
+    """
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+    
+    # Convert to seconds for plotting
+    event_times_s = session.events['timestamp_ms'] / 1000
+    time_bins_s = time_bins / 1000
+    
+    # 1. True flip state over time
+    event_values = session.events[event_column].astype(int)
+    ax1.fill_between(event_times_s, 0, event_values, alpha=0.7, 
+                     color='blue' if event_values.iloc[0] else 'lightgray',
+                     step='pre', label=f'True {event_column}')
+    
+    # Add color changes for flip states
+    flip_changes = np.where(np.diff(event_values))[0]
+    for i, change_idx in enumerate(flip_changes):
+        change_time = event_times_s.iloc[change_idx]
+        next_value = event_values.iloc[change_idx + 1]
+        color = 'blue' if next_value else 'lightgray'
+        
+        # Fill from this change to the next (or end)
+        end_idx = flip_changes[i + 1] if i + 1 < len(flip_changes) else len(event_times_s) - 1
+        end_time = event_times_s.iloc[end_idx]
+        
+        ax1.fill_between(event_times_s.iloc[change_idx:end_idx + 1], 0, 
+                        event_values.iloc[change_idx:end_idx + 1],
+                        alpha=0.7, color=color, step='pre')
+    
+    ax1.set_ylabel(f'True {event_column}', fontsize=12*text_size_scale)
+    ax1.set_title(f"{mouse_id}-{session_id} {model_name} Temporal Predictions", fontsize=14*text_size_scale)
+    ax1.set_ylim(-0.1, 1.1)
+    ax1.set_yticks([0, 1])
+    ax1.tick_params(labelsize=10*text_size_scale)
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Predicted binary classifications over time
+    # Create step plot for binary predictions
+    correct_mask = y_true_bins == y_pred_bins
+    incorrect_mask = ~correct_mask
+    
+    # Plot correct predictions
+    if np.any(correct_mask):
+        ax2.scatter(time_bins_s[correct_mask], y_pred_bins[correct_mask], 
+                   c='green', marker='|', s=30, alpha=0.8, 
+                   label=f'Correct ({np.sum(correct_mask)}/{len(y_pred_bins)})')
+    
+    # Plot incorrect predictions
+    if np.any(incorrect_mask):
+        ax2.scatter(time_bins_s[incorrect_mask], y_pred_bins[incorrect_mask], 
+                   c='red', marker='|', s=30, alpha=0.8,
+                   label=f'Incorrect ({np.sum(incorrect_mask)}/{len(y_pred_bins)})')
+    
+    ax2.set_ylabel('Predicted Class', fontsize=12*text_size_scale)
+    ax2.set_ylim(-0.1, 1.1)
+    ax2.set_yticks([0, 1])
+    if show_legends:
+        ax2.legend(loc='upper right', fontsize=10*text_size_scale)
+    ax2.tick_params(labelsize=10*text_size_scale)
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. Prediction confidence over time
+    # Color by correctness
+    if np.any(correct_mask):
+        ax3.scatter(time_bins_s[correct_mask], y_prob_bins[correct_mask], 
+                   c='green', marker='o', s=10, alpha=0.6, 
+                   label='Correct Predictions')
+    
+    if np.any(incorrect_mask):
+        ax3.scatter(time_bins_s[incorrect_mask], y_prob_bins[incorrect_mask], 
+                   c='red', marker='o', s=10, alpha=0.6,
+                   label='Incorrect Predictions')
+    
+    # Add decision threshold line
+    ax3.axhline(y=0.5, color='black', linestyle='--', alpha=0.5, 
+               label='Decision Threshold (0.5)')
+    
+    ax3.set_ylabel('Prediction Probability', fontsize=12*text_size_scale)
+    ax3.set_xlabel('Time (s)', fontsize=12*text_size_scale)
+    ax3.set_ylim(0, 1)
+    if show_legends:
+        ax3.legend(loc='upper right', fontsize=10*text_size_scale)
+    ax3.tick_params(labelsize=10*text_size_scale)
+    ax3.grid(True, alpha=0.3)
+    
+    # Add trial boundaries if requested
+    if show_trial_boundaries and 'trial_number' in session.events.columns:
+        # Find trial boundaries (where trial number changes)
+        trial_numbers = session.events['trial_number'].fillna(-1)  # Fill NaN with -1
+        trial_changes = np.where(np.diff(trial_numbers))[0]
+        
+        # Add vertical lines at trial boundaries to all subplots
+        for change_idx in trial_changes:
+            boundary_time = event_times_s.iloc[change_idx + 1]  # Start of new trial
+            
+            ax1.axvline(x=boundary_time, color='red', linestyle=':', alpha=0.5, linewidth=1)
+            ax2.axvline(x=boundary_time, color='red', linestyle=':', alpha=0.5, linewidth=1)
+            ax3.axvline(x=boundary_time, color='red', linestyle=':', alpha=0.5, linewidth=1)
+        
+        # Add to legend (just once)
+        if len(trial_changes) > 0:
+            ax1.axvline(x=-1, color='red', linestyle=':', alpha=0.5, linewidth=1,
+                       label=f'Trial boundaries ({len(trial_changes)} changes)')
+            if show_legends:
+                ax1.legend(loc='upper right')
+    
+    # Calculate and display accuracy
+    accuracy = np.mean(correct_mask)
+    plt.figtext(0.02, 0.02, f'Overall Accuracy: {accuracy:.3f} ({np.sum(correct_mask)}/{len(y_pred_bins)} bins)',
+                fontsize=10*text_size_scale, bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+    
+    # Set white background
+    fig.patch.set_facecolor('white')
+    for ax in [ax1, ax2, ax3]:
+        ax.set_facecolor('white')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
+
+
+def plot_data_splits_timeline(session: SessionData, event_column: str, time_bins: np.ndarray,
+                              train_indices: np.ndarray, val_indices: np.ndarray,
+                              test_indices: np.ndarray, bin_size_ms: float,
+                              sequence_labels: np.ndarray = None, sequence_length: int = None,
                               stride: int = None, train_seq_indices: np.ndarray = None,
                               val_seq_indices: np.ndarray = None, test_seq_indices: np.ndarray = None,
-                              mouse_id: str = "", session_id: str = "", show_trial_boundaries: bool = False):
+                              mouse_id: str = "", session_id: str = "", show_trial_boundaries: bool = False,
+                              text_size_scale: float = 1.0, show_legends: bool = True):
     """
     Plot timeline showing event_column over time with train/val/test split overlays.
     
@@ -389,10 +556,11 @@ def plot_data_splits_timeline(session: SessionData, event_column: str, time_bins
                         event_values.iloc[change_idx:end_idx + 1],
                         alpha=0.7, color=color, step='pre')
     
-    ax1.set_ylabel(f'{event_column}')
-    ax1.set_title(f"{mouse_id}-{session_id} '{event_column}' State")
+    ax1.set_ylabel(f'{event_column}', fontsize=12*text_size_scale)
+    ax1.set_title(f"{mouse_id}-{session_id} '{event_column}' State", fontsize=14*text_size_scale)
     ax1.set_ylim(-0.1, 1.1)
     ax1.set_yticks([])
+    ax1.tick_params(labelsize=10*text_size_scale)
     ax1.grid(False)
     
     # Plot 2: Data splits overlay with positive/negative labels
@@ -493,7 +661,7 @@ def plot_data_splits_timeline(session: SessionData, event_column: str, time_bins
                        c='plum', marker='|', s=marker_size, alpha=marker_alpha,
                        label=f'Test Negative ({len(test_neg_times)} bins)')
         
-        ax2.set_title('Train/Val/Test Split')
+        ax2.set_title('Train/Val/Test Split', fontsize=14*text_size_scale)
     
     else:
         # Fallback to original plotting if sequence information not provided
@@ -513,7 +681,7 @@ def plot_data_splits_timeline(session: SessionData, event_column: str, time_bins
                            s=50, label=f'{split_type.title()} ({np.sum(mask)} bins)')
                 height += .1
         
-        ax2.set_title('Train/Validation/Test Split Distribution')
+        ax2.set_title('Train/Validation/Test Split Distribution', fontsize=14*text_size_scale)
     
     # Add trial boundaries if requested
     if show_trial_boundaries and 'trial_number' in session.events.columns:
@@ -534,11 +702,13 @@ def plot_data_splits_timeline(session: SessionData, event_column: str, time_bins
             ax2.axvline(x=-1, color='red', linestyle=':', alpha=0.5, linewidth=1, 
                        label=f'Trial boundaries ({len(trial_changes)} changes)')
     
-    ax2.set_xlabel('Time (s)')
+    ax2.set_xlabel('Time (s)', fontsize=12*text_size_scale)
     ax2.set_ylim(0, height_offset + 2*start_height)
     ax2.set_yticks([])
     ax2.set_ylabel('')
-    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    if show_legends:
+        ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10*text_size_scale)
+    ax2.tick_params(labelsize=10*text_size_scale)
     ax2.grid(False)
     
     # Set white background for entire figure
@@ -693,6 +863,140 @@ def create_trial_based_split(session: SessionData, sequence_labels: np.ndarray, 
         print("Warning: No test sequences assigned")
     
     return train_indices, val_indices, test_indices, trial_assignments
+
+
+def create_balanced_temporal_split(sequence_labels: np.ndarray, time_bins: np.ndarray,
+                                  train_size: float = 0.6, val_size: float = 0.2, test_size: float = 0.2,
+                                  n_blocks: int = 10, random_state: int = 42) -> tuple:
+    """
+    Create train/val/test split with balanced temporal distribution across the session.
+    
+    This method divides the session into temporal blocks and samples proportionally 
+    from each block to ensure even representation across time, regardless of trial density.
+    
+    Parameters:
+    -----------
+    sequence_labels : np.ndarray
+        Labels for each sequence
+    time_bins : np.ndarray
+        Time bin centers used for analysis
+    train_size : float
+        Proportion of data for training (default: 0.6)
+    val_size : float
+        Proportion of data for validation (default: 0.2)
+    test_size : float
+        Proportion of data for testing (default: 0.2)
+    n_blocks : int
+        Number of temporal blocks to create (default: 10)
+    random_state : int
+        Random seed for reproducible splits
+        
+    Returns:
+    --------
+    train_indices : np.ndarray
+        Sequence indices for training
+    val_indices : np.ndarray
+        Sequence indices for validation
+    test_indices : np.ndarray
+        Sequence indices for testing
+    block_info : dict
+        Information about the temporal blocks created
+    """
+    # Validate split proportions
+    if abs((train_size + val_size + test_size) - 1.0) > 1e-6:
+        raise ValueError(f"Split proportions must sum to 1.0, got {train_size + val_size + test_size}")
+    
+    n_sequences = len(sequence_labels)
+    
+    # Set random seed for reproducible splits
+    np.random.seed(random_state)
+    
+    # Create temporal blocks
+    block_size = n_sequences // n_blocks
+    remainder = n_sequences % n_blocks
+    
+    print(f"Creating {n_blocks} balanced temporal blocks from {n_sequences} sequences:")
+    print(f"  Base block size: {block_size} sequences")
+    if remainder > 0:
+        print(f"  {remainder} blocks will have {block_size + 1} sequences")
+    
+    # Initialize split arrays
+    train_indices = []
+    val_indices = []
+    test_indices = []
+    block_info = []
+    
+    # For each temporal block, sample proportionally for train/val/test
+    for block_idx in range(n_blocks):
+        # Calculate block boundaries
+        start_idx = block_idx * block_size + min(block_idx, remainder)
+        if block_idx < remainder:
+            end_idx = start_idx + block_size + 1
+        else:
+            end_idx = start_idx + block_size
+        
+        block_sequences = np.arange(start_idx, end_idx)
+        block_labels = sequence_labels[start_idx:end_idx]
+        block_size_actual = len(block_sequences)
+        
+        print(f"  Block {block_idx}: sequences {start_idx}-{end_idx-1} ({block_size_actual} sequences, {np.mean(block_labels):.3f} positive)")
+        
+        # Shuffle sequences within this block
+        shuffled_indices = np.random.permutation(block_sequences)
+        
+        # Calculate split sizes for this block
+        n_train_block = int(block_size_actual * train_size)
+        n_val_block = int(block_size_actual * val_size)
+        n_test_block = block_size_actual - n_train_block - n_val_block  # Ensure all assigned
+        
+        # Assign sequences to splits
+        block_train = shuffled_indices[:n_train_block]
+        block_val = shuffled_indices[n_train_block:n_train_block + n_val_block]
+        block_test = shuffled_indices[n_train_block + n_val_block:]
+        
+        train_indices.extend(block_train)
+        val_indices.extend(block_val)
+        test_indices.extend(block_test)
+        
+        # Store block information
+        block_info.append({
+            'block_idx': block_idx,
+            'start_seq': start_idx,
+            'end_seq': end_idx - 1,
+            'n_sequences': block_size_actual,
+            'n_train': len(block_train),
+            'n_val': len(block_val),
+            'n_test': len(block_test),
+            'positive_rate': np.mean(block_labels)
+        })
+        
+        print(f"    Block {block_idx} split: {len(block_train)} train, {len(block_val)} val, {len(block_test)} test")
+    
+    # Convert to numpy arrays and sort (to maintain some temporal order within splits)
+    train_indices = np.sort(np.array(train_indices))
+    val_indices = np.sort(np.array(val_indices))
+    test_indices = np.sort(np.array(test_indices))
+    
+    # Print class balance for each split
+    if len(train_indices) > 0:
+        train_pos_rate = np.mean(sequence_labels[train_indices])
+        print(f"Overall Train: {len(train_indices)} sequences, {train_pos_rate:.3f} positive rate")
+    else:
+        print("Warning: No training sequences assigned")
+        
+    if len(val_indices) > 0:
+        val_pos_rate = np.mean(sequence_labels[val_indices])
+        print(f"Overall Val: {len(val_indices)} sequences, {val_pos_rate:.3f} positive rate")
+    else:
+        print("Warning: No validation sequences assigned")
+        
+    if len(test_indices) > 0:
+        test_pos_rate = np.mean(sequence_labels[test_indices])
+        print(f"Overall Test: {len(test_indices)} sequences, {test_pos_rate:.3f} positive rate")
+    else:
+        print("Warning: No test sequences assigned")
+    
+    return train_indices, val_indices, test_indices, block_info
 
 
 def create_sequences(population_matrix: np.ndarray, labels: np.ndarray, 
@@ -898,9 +1202,12 @@ def run_svm_demo(mouse_id: str, session_id: str, experiment: str,
                  exclude_final_flip: bool = False,
                  filter_boundaries: bool = False,
                  use_trial_split: bool = False,
+                 use_stratified_temporal: bool = False,
                  train_size: float = 0.6,
                  val_size: float = 0.2,
-                 random_state: int = 42):
+                 random_state: int = 42,
+                 text_size_scale: float = 1.0,
+                 show_legends: bool = True):
     """
     Run complete SVM classification demo.
     
@@ -947,13 +1254,17 @@ def run_svm_demo(mouse_id: str, session_id: str, experiment: str,
     use_trial_split : bool
         If True, use trial-based splitting instead of temporal block splitting (default: False).
         Requires trial_number column in events data.
+    use_stratified_temporal : bool
+        If True, use balanced temporal stratification (default: False).
+        Creates temporal blocks and samples proportionally from each for balanced coverage.
+        Cannot be used with use_trial_split.
     train_size : float
-        Proportion of trials for training when using trial-based split (default: 0.6).
+        Proportion of data for training when using trial-based or stratified temporal split (default: 0.6).
     val_size : float  
-        Proportion of trials for validation when using trial-based split (default: 0.2).
+        Proportion of data for validation when using trial-based or stratified temporal split (default: 0.2).
         Test size will be 1 - train_size - val_size.
     random_state : int
-        Random seed for reproducible trial-based splits (default: 42).
+        Random seed for reproducible splits (default: 42).
     """
     print("="*60)
     print("SVM NEURAL POPULATION CLASSIFICATION DEMO")
@@ -1038,7 +1349,10 @@ def run_svm_demo(mouse_id: str, session_id: str, experiment: str,
         print(f"Warning: Highly imbalanced classes (positive rate: {np.mean(sequence_labels):.3f})")
         print("Consider using different aggregation or event column")
     
-    # Choose splitting method based on use_trial_split parameter
+    # Choose splitting method 
+    if use_trial_split and use_stratified_temporal:
+        raise ValueError("Cannot use both use_trial_split and use_stratified_temporal. Choose one.")
+    
     if use_trial_split:
         print(f"\n{step_num+1}. Trial-based splitting (train: {train_size:.1f}, val: {val_size:.1f}, test: {1-train_size-val_size:.1f})...")
         
@@ -1050,6 +1364,18 @@ def run_svm_demo(mouse_id: str, session_id: str, experiment: str,
         
         print(f"Trial-based split completed:")
         print(f"  Trial assignments: {len(trial_assignments['train'])} train, {len(trial_assignments['val'])} val, {len(trial_assignments['test'])} test trials")
+        
+    elif use_stratified_temporal:
+        print(f"\n{step_num+1}. Balanced temporal stratification (train: {train_size:.1f}, val: {val_size:.1f}, test: {1-train_size-val_size:.1f})...")
+        
+        # Use balanced temporal stratification
+        train_indices, val_indices, test_indices, block_info = create_balanced_temporal_split(
+            sequence_labels, time_bins, train_size, val_size, 1-train_size-val_size, 
+            n_blocks=10, random_state=random_state
+        )
+        
+        print(f"Balanced temporal stratification completed:")
+        print(f"  Created {len(block_info)} temporal blocks with balanced sampling")
         
     else:
         print(f"\n{step_num+1}. Simple train/val/test splitting (test size: {test_size})...")
@@ -1118,13 +1444,14 @@ def run_svm_demo(mouse_id: str, session_id: str, experiment: str,
     print(f"  Test: {len(test_time_indices)} time bins")
     print(f"  Total unique: {len(np.unique(np.concatenate([train_time_indices, val_time_indices, test_time_indices])))}/{len(time_bins)}")
     
-    plot_data_splits_timeline(session, event_column, time_bins, 
+    plot_data_splits_timeline(session, event_column, time_bins,
                               train_time_indices, val_time_indices, test_time_indices, bin_size_ms,
                               sequence_labels=sequence_labels, sequence_length=sequence_length,
                               stride=stride, train_seq_indices=train_indices,
                               val_seq_indices=val_indices, test_seq_indices=test_indices,
-                              mouse_id=mouse_id, session_id=session_id, 
-                              show_trial_boundaries=use_trial_split)
+                              mouse_id=mouse_id, session_id=session_id,
+                              show_trial_boundaries=use_trial_split, text_size_scale=text_size_scale,
+                              show_legends=show_legends)
     
     # Initialize SVM classifier
     print(f"\n{step_num+2}. Initializing SVM classifier...")
@@ -1170,7 +1497,58 @@ def run_svm_demo(mouse_id: str, session_id: str, experiment: str,
     
     # Create comprehensive plots after training is complete
     print(f"\n{step_num+5}. Generating evaluation plots...")
-    plot_classifier_results(history, y_true, y_pred, y_prob, "SVM Classifier", mouse_id, session_id, event_column)
+    plot_classifier_results(history, y_true, y_pred, y_prob, "SVM Classifier", mouse_id, session_id, event_column, text_size_scale, show_legends)
+    
+    # Generate temporal prediction visualization
+    print(f"\n{step_num+6}. Generating temporal prediction visualization...")
+    
+    # Create bin-wise predictions by mapping sequence predictions back to time bins
+    # We'll use all sequences (train + val + test) to get full timeline coverage
+    all_seq_indices = np.concatenate([train_indices, val_indices, test_indices])
+    all_sequences = sequences[all_seq_indices]
+    all_seq_labels = sequence_labels[all_seq_indices]
+    
+    # Get predictions for all sequences using SVM
+    X_all_flat = classifier._flatten_sequences(all_sequences)
+    X_all_scaled = classifier.scaler.transform(X_all_flat)
+    
+    all_preds = classifier.model.predict(X_all_scaled)
+    all_probs = classifier.model.predict_proba(X_all_scaled)[:, 1]  # Probability of positive class
+    
+    # Map sequence predictions back to time bins
+    # Initialize with NaN (for bins not covered by any sequence)
+    y_pred_bins = np.full(len(time_bins), np.nan)
+    y_prob_bins = np.full(len(time_bins), np.nan)
+    y_true_bins = session.create_event_colormap(time_bins, event_column, aggregation='any')
+    
+    # For each sequence, assign its prediction to the corresponding time bins
+    for i, seq_idx in enumerate(all_seq_indices):
+        # Calculate which time bins this sequence corresponds to
+        start_bin = seq_idx * stride
+        end_bin = start_bin + sequence_length
+        
+        # Assign this sequence's prediction to all bins it covers
+        for bin_idx in range(start_bin, min(end_bin, len(time_bins))):
+            y_pred_bins[bin_idx] = all_preds[i]
+            y_prob_bins[bin_idx] = all_probs[i]
+    
+    # Remove NaN values (bins not covered by any sequence)
+    valid_mask = ~np.isnan(y_pred_bins)
+    y_true_bins_clean = y_true_bins[valid_mask]
+    y_pred_bins_clean = y_pred_bins[valid_mask].astype(int)
+    y_prob_bins_clean = y_prob_bins[valid_mask]
+    time_bins_clean = time_bins[valid_mask]
+    
+    print(f"Temporal predictions: {len(time_bins_clean)}/{len(time_bins)} bins covered")
+    
+    # Plot temporal predictions
+    plot_temporal_predictions(
+        session, event_column, time_bins_clean,
+        y_true_bins_clean, y_pred_bins_clean, y_prob_bins_clean,
+        mouse_id, session_id, "SVM Classifier",
+        show_trial_boundaries=use_trial_split, text_size_scale=text_size_scale,
+        show_legends=show_legends
+    )
     
     return classifier, metrics, history
 
@@ -1179,13 +1557,13 @@ if __name__ == "__main__":
     # Example usage - optimized for neural data with cluster filtering
     run_svm_demo(
         mouse_id="7004",
-        session_id="o3", 
-        experiment="clickbait-odor",
+        session_id="v8", 
+        experiment="clickbait-visual",
         event_column="flip_state",
         base_path="S:\\",
-        sequence_length=10,  # Number of time bins per sequence
+        sequence_length=5,  # Number of time bins per sequence
         bin_size_ms=500,  # Coarser temporal resolution  
-        stride=10,  # Dense sampling
+        stride=5,  # Dense sampling
         test_size=0.2,
         kernel='rbf',  # SVM kernel
         C=1.0,  # Regularization parameter
@@ -1195,8 +1573,11 @@ if __name__ == "__main__":
         cluster_filter='best_channel > 16',  # Filter by cluster attribute
         exclude_final_flip=False,  # Exclude final flip_state period
         filter_boundaries=False,  # Set to True to skip boundary-crossing sequences
-        use_trial_split=True,  # Use trial-based splitting for better temporal structure
+        use_trial_split=False,  # Use trial-based splitting for better temporal structure
+        use_stratified_temporal=True,
         train_size=0.6,  # 60% of trials for training
         val_size=0.2,  # 20% of trials for validation (20% remaining for test)
-        random_state=42  # For reproducible splits
+        random_state=42,  # For reproducible splits
+        text_size_scale=2.0,  # Make text twice as big for presentations
+        show_legends=False  # Hide legends for cleaner presentation slides
     )
