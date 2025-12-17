@@ -1394,7 +1394,7 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
     print(f"\n6. Training LSTM model for {epochs} epochs...")
     history = classifier.train_model(
         train_dataset, val_dataset,
-        epochs=epochs, batch_size=16, learning_rate=0.0001,
+        epochs=epochs, batch_size=128, learning_rate=0.0001,
         verbose=True, use_best_model=use_best_model
     )
     
@@ -1511,22 +1511,22 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
 if __name__ == "__main__":
     # Example usage - optimized for neural data with cluster filtering
     run_lstm_demo(
-        mouse_id="7003",
-        session_id="f0", 
-        experiment="clickbait-visual",
+        mouse_id="7010",
+        session_id="m10", 
+        experiment="clickbait-motivate",
         event_column="flip_state",
         base_path="S:\\",
         sequence_length=5,  # Number of time bins per sequence
         bin_size_ms=200,  # Coarser temporal resolution  
         stride=5,  # Dense sampling
         test_size=0.2,
-        epochs=500,  # Training epochs
+        epochs=1500,  # Training epochs
         hidden_size=24,  # Small hidden size to discourage overfitting
         num_layers=2,  # Depth of network
         bidirectional=False,
         use_best_model=True,  # Use best validation model
         centroid_y_threshold=np.inf,  # Y-axis halfway point = 1968//2
-        #cluster_filter='best_channel > 16',  # Filter by cluster attribute
+        cluster_filter='best_channel <= 16',  # Filter by cluster attribute
         exclude_final_flip=False,  # Exclude final flip_state period
         filter_boundaries=False,  # Set to True to skip boundary-crossing sequences
         use_trial_split=False,  # Use trial-based splitting for better temporal structure

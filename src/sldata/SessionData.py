@@ -50,7 +50,7 @@ class SessionData:
     """
     
     def __init__(self, mouse_id: str, session_id: str, experiment: str, base_path: str = "S:\\", 
-                 sampling_rate: float = 30000.0, min_spikes: int = 50,
+                 sampling_rate: float = 30000.0, min_spikes: int = 250,
                  verbose: bool = True):
         """
         Initialize SessionData object by loading preprocessed neural data.
