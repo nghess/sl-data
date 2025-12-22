@@ -1511,8 +1511,8 @@ def run_lstm_demo(mouse_id: str, session_id: str, experiment: str,
 if __name__ == "__main__":
     # Example usage - optimized for neural data with cluster filtering
     run_lstm_demo(
-        mouse_id="7010",
-        session_id="m10", 
+        mouse_id="7012",
+        session_id="m12", 
         experiment="clickbait-motivate",
         event_column="flip_state",
         base_path="S:\\",

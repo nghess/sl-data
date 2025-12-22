@@ -14,6 +14,10 @@ from typing import Optional, Dict, Tuple, Union, List
 from scipy.stats import zscore
 from scipy import signal
 from scipy.signal import find_peaks
+from scipy.ndimage import gaussian_filter
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FormatStrFormatter
+import seaborn as sns
 import cv2
 import os
 import operator
@@ -49,12 +53,12 @@ class SessionData:
         Peak times of sniff signal in milliseconds (if available)
     """
     
-    def __init__(self, mouse_id: str, session_id: str, experiment: str, base_path: str = "S:\\", 
+    def __init__(self, mouse_id: str, session_id: str, experiment: str, base_path: str = "S:\\",
                  sampling_rate: float = 30000.0, min_spikes: int = 250,
-                 verbose: bool = True):
+                 exclude_noise: bool = True, verbose: bool = True):
         """
         Initialize SessionData object by loading preprocessed neural data.
-        
+
         Parameters:
         -----------
         mouse_id : str
@@ -67,6 +71,8 @@ class SessionData:
             Neural data sampling rate in Hz
         min_spikes : int
             Minimum number of spikes required to include a cluster
+        exclude_noise : bool
+            Whether to exclude clusters labeled as 'noise' (default: True)
         verbose : bool
             Whether to print loading information
         """
@@ -78,11 +84,13 @@ class SessionData:
         self.video = cv2.VideoCapture()
         self.sampling_rate = sampling_rate
         self.min_spikes = min_spikes
+        self.exclude_noise = exclude_noise
         self.verbose = verbose
-        
+
         # Initialize containers
         self.clusters = {}
         self.raw_data = {}
+        self.cluster_labels = {}  # Maps cluster_id -> label
         self.n_clusters = 0
         self.events = pd.DataFrame()
         self.duration = np.int32()
@@ -98,9 +106,17 @@ class SessionData:
         self._load_ephys_data()
         self._load_events_data()
         self._load_video()
+        self._load_cluster_labels()
         self._process_clusters()
         self._process_signals()
         self.find_sniff_peaks(prominence=1000, distance=50)
+
+        if 'nose.x' in self.events:
+            self.position_x = 'nose.x'
+            self.position_y = 'nose.y'
+        else:
+            self.position_x = 'bonsai_centroid_x'
+            self.position_y = 'bonsai_centroid_y'
         
         
         if verbose:
@@ -254,12 +270,12 @@ class SessionData:
             Events dataframe with behavioral data from Bonsai
         """
         events_path = self._get_file_path("events.csv")
-        
+
         if events_path is None:
             if self.verbose:
                 print("Warning: events.csv not found")
             return
-        
+
         try:
             self.events = pd.read_csv(events_path)
             self.duration = (self.events['timestamp_ms'].iloc[-1] - self.events['timestamp_ms'].iloc[0])
@@ -268,6 +284,76 @@ class SessionData:
         except Exception as e:
             if self.verbose:
                 print(f"Error loading events from {events_path}: {e}")
+
+    def _load_cluster_labels(self):
+        """
+        Load cluster labels from cluster_group.tsv file.
+
+        This file contains cluster quality labels (good, mua, noise).
+        Looks for label column with header 'group' first, then 'KSLabel' as fallback.
+        Cluster ID is always assumed to be in the first column.
+        """
+        cluster_group_path = self._get_file_path("cluster_group.tsv")
+
+        if cluster_group_path is None:
+            if self.verbose:
+                print("Warning: cluster_group.tsv not found. All clusters will be labeled as 'unknown'.")
+            return
+
+        try:
+            # Read the TSV file
+            with open(cluster_group_path, 'r') as f:
+                lines = f.readlines()
+
+            if len(lines) < 2:
+                if self.verbose:
+                    print("Warning: cluster_group.tsv is empty or has no data rows")
+                return
+
+            # Parse header to find the label column
+            header = lines[0].strip().split('\t')
+            label_col_idx = None
+
+            # First try to find 'group' column
+            for idx, col_name in enumerate(header):
+                if col_name.lower() == 'group':
+                    label_col_idx = idx
+                    break
+
+            # If 'group' not found, try 'KSLabel'
+            if label_col_idx is None:
+                for idx, col_name in enumerate(header):
+                    if col_name.lower() == 'kslabel':
+                        label_col_idx = idx
+                        break
+
+            # If still not found, use column 1 as default
+            if label_col_idx is None:
+                label_col_idx = 1
+                if self.verbose:
+                    print("Warning: Neither 'group' nor 'KSLabel' column found. Using column 1 for labels.")
+
+            # Parse data lines
+            for line in lines[1:]:
+                parts = line.strip().split('\t')
+                if len(parts) > label_col_idx:
+                    try:
+                        cluster_id = int(parts[0])  # Column 0: cluster_id (always)
+                        label = parts[label_col_idx].strip()  # Label column (found from header)
+                        self.cluster_labels[cluster_id] = label
+                    except (ValueError, IndexError):
+                        # Skip malformed lines
+                        continue
+
+            if self.verbose:
+                n_good = sum(1 for label in self.cluster_labels.values() if label == 'good')
+                n_mua = sum(1 for label in self.cluster_labels.values() if label == 'mua')
+                n_noise = sum(1 for label in self.cluster_labels.values() if label == 'noise')
+                print(f"Loaded cluster labels: {n_good} good, {n_mua} mua, {n_noise} noise")
+
+        except Exception as e:
+            if self.verbose:
+                print(f"Error loading cluster labels from {cluster_group_path}: {e}")
     
     def _get_cluster_spike_times(self, spike_times: np.ndarray, spike_templates: np.ndarray, 
                                 cluster_id: int, position_times: Optional[np.ndarray] = None,
@@ -314,56 +400,74 @@ class SessionData:
         """Process clusters and extract relevant information."""
         if 'spike_times' not in self.raw_data or 'spike_templates' not in self.raw_data:
             raise ValueError("Missing required spike data")
-        
+
         spike_times = self.raw_data['spike_times']
         spike_templates = self.raw_data['spike_templates']
         templates = self.raw_data.get('templates')
-        
+
         # Get unique cluster IDs
         unique_clusters = np.unique(spike_templates)
-        
-        # Collect valid clusters first (those meeting min_spikes threshold)
+
+        # Collect valid clusters first (those meeting min_spikes threshold and not noise)
         valid_clusters = []
-        
+        n_excluded_noise = 0
+        n_excluded_spikes = 0
+
         for cluster_id in unique_clusters:
+            # Get label for this cluster
+            label = self.cluster_labels.get(cluster_id, 'unknown')
+
+            # Skip noise clusters if exclude_noise is True
+            if self.exclude_noise and label == 'noise':
+                n_excluded_noise += 1
+                continue
+
             # Get spike times for this cluster using internal method
             cluster_spike_times = self._get_cluster_spike_times(
-                spike_times, spike_templates, cluster_id, 
+                spike_times, spike_templates, cluster_id,
                 sampling_rate=self.sampling_rate, time_filter=False
             )
-            
+
             # Apply minimum spike threshold
             if len(cluster_spike_times) < self.min_spikes:
+                n_excluded_spikes += 1
                 continue
-            
+
             # Get best channel and waveform template
             best_channel = None
             waveform_template = None
-            
+
             if templates is not None and cluster_id < len(templates):
                 template = templates[cluster_id]
                 # Best channel is the one with maximum absolute amplitude
                 best_channel = np.argmax(np.max(np.abs(template), axis=0))
                 # Extract waveform for best channel
                 waveform_template = template[:, best_channel]
-            
-            # Store cluster information with original cluster_id
+
+            # Store cluster information with original cluster_id and label
             cluster_info = {
                 'cluster_id': int(cluster_id),  # Original cluster ID from Kilosort
+                'label': label,  # Cluster quality label (good, mua, noise, unknown)
                 'best_channel': best_channel,
                 'spike_times': cluster_spike_times,
                 'waveform_template': waveform_template,
                 'n_spikes': len(cluster_spike_times)
             }
-            
+
             valid_clusters.append(cluster_info)
-        
+
         # Now store clusters with sequential indices (no gaps)
         self.clusters = {}
         for i, cluster_info in enumerate(valid_clusters):
             self.clusters[i] = cluster_info
-        
+
         self.n_clusters = len(self.clusters)
+
+        if self.verbose:
+            if n_excluded_noise > 0:
+                print(f"Excluded {n_excluded_noise} noise clusters")
+            if n_excluded_spikes > 0:
+                print(f"Excluded {n_excluded_spikes} clusters with < {self.min_spikes} spikes")
     
     def _process_signals(self):
         """Process signal traces (sniff, etc.)."""
@@ -375,10 +479,72 @@ class SessionData:
             if self.verbose:
                 print("No sniff data found")
     
+    def _compute_percentile_limits(self, data, lower_percentile=5, upper_percentile=95):
+        """
+        Compute percentile-based limits for colormap scaling.
+
+        Parameters:
+        -----------
+        data : numpy.ndarray
+            2D array of data values (can contain NaNs)
+        lower_percentile : float
+            Lower percentile for vmin (default: 5)
+        upper_percentile : float
+            Upper percentile for vmax (default: 95)
+
+        Returns:
+        --------
+        vmin : float
+            Lower percentile value
+        vmax : float
+            Upper percentile value
+        """
+        # Get non-NaN values
+        valid_data = data[~np.isnan(data)]
+
+        if len(valid_data) == 0:
+            return 0, 1
+
+        vmin = np.percentile(valid_data, lower_percentile)
+        vmax = np.percentile(valid_data, upper_percentile)
+
+        # Ensure vmin < vmax
+        if vmin >= vmax:
+            vmax = vmin + 1
+
+        return vmin, vmax
+
+    def _upsample_map(self, data, zoom_factor=5):
+        """
+        Upsample spatial map with smooth interpolation for visualization.
+
+        This is for visualization only - does not affect calculations.
+        Uses bilinear interpolation to create smooth, continuous-looking heatmaps.
+
+        Parameters:
+        -----------
+        data : numpy.ndarray
+            2D array to upsample (can contain NaNs)
+        zoom_factor : float
+            How much to upsample (default: 5 = 5x resolution)
+
+        Returns:
+        --------
+        upsampled : numpy.ndarray
+            Upsampled array with smooth interpolation between bins
+        """
+        from scipy.ndimage import zoom
+
+        # Use bilinear interpolation (order=1) for smooth appearance
+        # This creates smooth transitions between bins
+        upsampled = zoom(data, zoom_factor, order=1)
+
+        return upsampled
+
     def get_cluster_ids(self) -> list:
         """
         Get list of cluster indices (sequential 0-based indices).
-        
+
         Returns:
         --------
         cluster_indices : list
@@ -389,14 +555,56 @@ class SessionData:
     def get_original_cluster_ids(self) -> list:
         """
         Get list of original Kilosort cluster IDs.
-        
+
         Returns:
         --------
         original_cluster_ids : list
             List of original cluster IDs from Kilosort data
         """
         return [cluster_info['cluster_id'] for cluster_info in self.clusters.values()]
-    
+
+    def get_clusters_by_label(self, label: str) -> list:
+        """
+        Get list of cluster indices with a specific label.
+
+        Parameters:
+        -----------
+        label : str
+            Cluster quality label to filter by (e.g., 'good', 'mua', 'noise')
+
+        Returns:
+        --------
+        cluster_indices : list
+            List of cluster indices matching the specified label
+
+        Examples:
+        ---------
+        >>> # Get only 'good' clusters
+        >>> good_clusters = session.get_clusters_by_label('good')
+        >>> print(f"Found {len(good_clusters)} good clusters")
+        """
+        return [i for i, cluster in self.clusters.items() if cluster['label'] == label]
+
+    def get_cluster_label_counts(self) -> dict:
+        """
+        Get count of clusters for each label.
+
+        Returns:
+        --------
+        label_counts : dict
+            Dictionary mapping label -> count
+
+        Examples:
+        ---------
+        >>> counts = session.get_cluster_label_counts()
+        >>> print(f"Good: {counts.get('good', 0)}, MUA: {counts.get('mua', 0)}")
+        """
+        label_counts = {}
+        for cluster in self.clusters.values():
+            label = cluster['label']
+            label_counts[label] = label_counts.get(label, 0) + 1
+        return label_counts
+
     def get_cluster_info(self, cluster_index: int) -> Dict:
         """
         Get information for a specific cluster.
@@ -1425,8 +1633,800 @@ class SessionData:
     def plot_trajectory(self):
         # Create plot
         fig, ax = plt.subplots(figsize=(self.width, self.height))
-        
-    
+
+    def compute_occupancy_map(self, bin_size=50.7, fixed_arena_bounds=None,
+                             min_occupancy=0.1, flip_state=None, return_metadata=True):
+        """
+        Compute occupancy map from position data.
+
+        Parameters:
+        -----------
+        bin_size : float
+            Spatial bin size in pixels (default: 50.7, which equals 1 cm)
+        fixed_arena_bounds : tuple, optional
+            Fixed arena bounds (x_min, x_max, y_min, y_max)
+        min_occupancy : float
+            Minimum occupancy threshold in seconds (default: 0.1)
+        flip_state : bool, optional
+            Filter by flip_state column. If None, use all data. If True or False,
+            only include events where flip_state matches this value.
+        return_metadata : bool
+            Whether to return metadata dict along with occupancy map (default: True)
+
+        Returns:
+        --------
+        occupancy_map : numpy.ndarray
+            2D array of occupancy times (in seconds) for each spatial bin
+        metadata : dict (if return_metadata=True)
+            Dictionary containing:
+            - 'x_edges': bin edges for x dimension
+            - 'y_edges': bin edges for y dimension
+            - 'x_min', 'x_max', 'y_min', 'y_max': arena bounds
+            - 'bin_size': spatial bin size used
+            - 'dt': median time step in seconds
+            - 'total_time': total time in valid bins (seconds)
+            - 'valid_bins': boolean mask of bins meeting min_occupancy threshold
+            - 'n_valid_bins': number of valid bins
+
+        Examples:
+        ---------
+        >>> # Basic usage
+        >>> occupancy_map, metadata = session.compute_occupancy_map()
+        >>>
+        >>> # Get occupancy map only (without metadata)
+        >>> occupancy_map = session.compute_occupancy_map(return_metadata=False)
+        >>>
+        >>> # Filter by flip_state
+        >>> occ_map_flip_true, _ = session.compute_occupancy_map(flip_state=True)
+        """
+        if self.events.empty:
+            raise ValueError("No events data available. Cannot compute occupancy map.")
+
+        if 'timestamp_ms' not in self.events.columns:
+            raise ValueError("Events DataFrame must contain 'timestamp_ms' column")
+
+        # Filter events by flip_state if requested
+        if flip_state is not None:
+            if 'flip_state' not in self.events.columns:
+                raise ValueError("Events DataFrame must contain 'flip_state' column for flip_state filtering")
+            events_filtered = self.events[self.events['flip_state'] == flip_state].copy()
+            if len(events_filtered) == 0:
+                raise ValueError(f"No events found with flip_state={flip_state}")
+        else:
+            events_filtered = self.events
+
+        # Extract position data
+        positions_array = events_filtered[[self.position_x, self.position_y]].values
+        pos_times_array = events_filtered['timestamp_ms'].values
+
+        # Calculate arena bounds
+        if fixed_arena_bounds is not None:
+            x_min, x_max, y_min, y_max = fixed_arena_bounds
+        else:
+            x_min, x_max = np.nanmin(positions_array[:, 0]), np.nanmax(positions_array[:, 0])
+            y_min, y_max = np.nanmin(positions_array[:, 1]), np.nanmax(positions_array[:, 1])
+            margin = bin_size * 0.5
+            x_min, x_max = x_min - margin, x_max + margin
+            y_min, y_max = y_min - margin, y_max + margin
+
+        # Create spatial bins
+        x_range = [x_min, x_max]
+        y_range = [y_min, y_max]
+        x_bins = int(np.ceil((x_range[1] - x_range[0]) / bin_size))
+        y_bins = int(np.ceil((y_range[1] - y_range[0]) / bin_size))
+
+        x_edges = np.linspace(x_range[0], x_range[1], x_bins + 1)
+        y_edges = np.linspace(y_range[0], y_range[1], y_bins + 1)
+
+        # Calculate occupancy map
+        dt = np.median(np.asarray(np.diff(pos_times_array), dtype=np.float64)) / 1000.0
+        occupancy_map, _, _ = np.histogram2d(
+            positions_array[:, 0], positions_array[:, 1],
+            bins=[x_edges, y_edges]
+        )
+        occupancy_map = occupancy_map * dt
+
+        if return_metadata:
+            # Calculate valid bins and total time
+            valid_bins = occupancy_map >= min_occupancy
+            total_time = np.sum(occupancy_map[valid_bins])
+            n_valid_bins = np.sum(valid_bins)
+
+            metadata = {
+                'x_edges': x_edges,
+                'y_edges': y_edges,
+                'x_min': x_min,
+                'x_max': x_max,
+                'y_min': y_min,
+                'y_max': y_max,
+                'bin_size': bin_size,
+                'dt': dt,
+                'total_time': total_time,
+                'valid_bins': valid_bins,
+                'n_valid_bins': n_valid_bins
+            }
+
+            return occupancy_map, metadata
+        else:
+            return occupancy_map
+
+    def plot_occupancy_map(self, bin_size=50.7, min_occupancy=0.1,
+                          fixed_arena_bounds=None,
+                          flip_state=None,
+                          title=None,
+                          xlabel='X Position (cm)',
+                          ylabel='Y Position (cm)',
+                          cbar_label='Occupancy (s)',
+                          cmap='viridis',
+                          vmin=None,
+                          vmax=None,
+                          use_percentile_limits=False,
+                          sigma=0,
+                          upsample=False,
+                          log_scale=False,
+                          min_max_ticks_only=False,
+                          cbar_min_max_only=True,
+                          cbar_shrink=0.76,
+                          hide_all_ticks=False,
+                          hide_axis_labels=False,
+                          figsize=(6, 6),
+                          save_plot=False,
+                          output_dir=None):
+        """
+        Create occupancy map with units in cm and 90-degree rotation.
+
+        Parameters:
+        -----------
+        bin_size : float
+            Spatial bin size in pixels (default: 50.7 = 1 cm)
+        min_occupancy : float
+            Minimum occupancy threshold in seconds
+        flip_state : bool, optional
+            Filter by flip_state column. If None, use all data.
+        use_percentile_limits : bool
+            if True, automatically set vmin and vmax to 5th and 95th percentiles (default: False).
+            Overrides vmin and vmax if they are None.
+        sigma : float
+            Gaussian smoothing sigma for visualization (default: 0 = no smoothing).
+            Applied after calculation, for display only.
+        upsample : bool
+            if True, upsample the display map to native pixel resolution (default: False).
+            For visualization only, does not affect calculations.
+        save_plot : bool
+            Whether to save the plot to disk
+        output_dir : str
+            Directory to save plot (if save_plot=True)
+
+        Returns:
+        --------
+        fig : matplotlib.figure.Figure
+            The figure object
+        data : dict
+            Dictionary containing 'occupancy_map' and 'occupancy_map_display'
+        """
+        px_per_cm = 50.7
+
+        # Filter events by flip_state if requested
+        if flip_state is not None:
+            if 'flip_state' not in self.events.columns:
+                raise ValueError("Events DataFrame must contain 'flip_state' column for flip_state filtering")
+            events_filtered = self.events[self.events['flip_state'] == flip_state].copy()
+            if len(events_filtered) == 0:
+                raise ValueError(f"No events found with flip_state={flip_state}")
+        else:
+            events_filtered = self.events
+
+        # Extract position data
+        positions_array = events_filtered[[self.position_x, self.position_y]].values
+        pos_times_array = events_filtered['timestamp_ms'].values
+
+        # Calculate arena bounds
+        if fixed_arena_bounds is not None:
+            x_min, x_max, y_min, y_max = fixed_arena_bounds
+        else:
+            # Start from 0 and extend to max of data plus margin
+            x_max = np.nanmax(positions_array[:, 0])
+            y_max = np.nanmax(positions_array[:, 1])
+            margin = bin_size * 0.5
+            x_min, x_max = 0, x_max + margin
+            y_min, y_max = 0, y_max + margin
+
+        # Create spatial bins
+        x_bins = int(np.ceil((x_max - x_min) / bin_size))
+        y_bins = int(np.ceil((y_max - y_min) / bin_size))
+        x_edges = np.linspace(x_min, x_max, x_bins + 1)
+        y_edges = np.linspace(y_min, y_max, y_bins + 1)
+
+        # Calculate occupancy map (swap x and y for 90-degree rotation)
+        dt = np.median(np.asarray(np.diff(pos_times_array), dtype=np.float64)) / 1000.0
+        occupancy_map, _, _ = np.histogram2d(
+            positions_array[:, 1], positions_array[:, 0],  # Swapped: y, x instead of x, y
+            bins=[y_edges, x_edges]  # Swapped: y_edges, x_edges
+        )
+        occupancy_map = occupancy_map * dt
+
+        # For display: transpose to get correct orientation
+        occupancy_map_display = occupancy_map.T
+
+        # Apply visualization-only transformations (smoothing and upsampling)
+        # These do NOT affect the original occupancy_map used for calculations
+        if sigma > 0:
+            occupancy_map_display = gaussian_filter(occupancy_map_display, sigma=sigma)
+
+        if upsample:
+            occupancy_map_display = self._upsample_map(occupancy_map_display, zoom_factor=5)
+
+        # Convert extent to cm - swapped for rotation: y range on x-axis, x range on y-axis
+        extent_cm = [y_min / px_per_cm, y_max / px_per_cm,
+                     x_min / px_per_cm, x_max / px_per_cm]
+
+        # Create figure
+        fig, ax = plt.subplots(figsize=figsize)
+
+        # Apply log scale if requested
+        plot_data = occupancy_map_display.copy()
+        if log_scale:
+            plot_data = np.log10(plot_data + 1e-10)  # Add small value to avoid log(0)
+            if cbar_label == 'Occupancy (s)':  # Update label if using default
+                cbar_label = 'Log10 Occupancy (s)'
+
+        # Use percentile limits if requested (and vmin/vmax not explicitly set)
+        if use_percentile_limits:
+            if vmin is None or vmax is None:
+                percentile_vmin, percentile_vmax = self._compute_percentile_limits(plot_data)
+                if vmin is None:
+                    vmin = percentile_vmin
+                if vmax is None:
+                    vmax = percentile_vmax
+
+        # Create x and y coordinates for the heatmap
+        x_coords = np.linspace(extent_cm[0], extent_cm[1], plot_data.shape[1])
+        y_coords = np.linspace(extent_cm[2], extent_cm[3], plot_data.shape[0])
+
+        # Plot using seaborn heatmap for better SVG rendering
+        im = sns.heatmap(plot_data, ax=ax, cmap=cmap,
+                         vmin=vmin, vmax=vmax,
+                         cbar_kws={'label': cbar_label, 'shrink': cbar_shrink},
+                         xticklabels=False, yticklabels=False,
+                         square=True)
+
+        # Get the colorbar to modify ticks
+        cbar = im.collections[0].colorbar
+
+        # Set colorbar ticks to min/max only if requested
+        if cbar_min_max_only:
+            actual_vmin, actual_vmax = cbar.vmin, cbar.vmax
+            cbar.set_ticks([actual_vmin, actual_vmax])
+
+        # Add black border around the heatmap
+        for spine in ax.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(1)
+            spine.set_visible(True)
+
+        # Manually set the extent since seaborn doesn't use extent parameter
+        ax.set_xlim(0, plot_data.shape[1])
+        ax.set_ylim(0, plot_data.shape[0])
+
+        # Create custom tick positions for extent in cm
+        n_xticks = 2  # min and max
+        n_yticks = 2
+        xtick_positions = np.linspace(0, plot_data.shape[1], n_xticks)
+        ytick_positions = np.linspace(0, plot_data.shape[0], n_yticks)
+        xtick_labels = [f'{extent_cm[0]:.1f}', f'{extent_cm[1]:.1f}']
+        ytick_labels = [f'{extent_cm[2]:.1f}', f'{extent_cm[3]:.1f}']
+
+        # Set axis labels (unless hidden)
+        if not hide_axis_labels:
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+
+        cbar = ax.collections[0].colorbar
+        cbar.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+        cbar.outline.set_edgecolor('black')
+        cbar.outline.set_linewidth(1)
+
+        ax.set_aspect('equal', adjustable='box')  # Force equal aspect ratio
+
+        # Set min/max ticks only if requested (overrides default)
+        if min_max_ticks_only:
+            ax.set_xticks(xtick_positions)
+            ax.set_yticks(ytick_positions)
+            ax.set_xticklabels(xtick_labels)
+            ax.set_yticklabels(ytick_labels)
+
+        # Hide all ticks and tick labels if requested
+        if hide_all_ticks:
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+
+        if title is None:
+            ax.set_title(f'{self.mouse_id} {self.session_id}\nOccupancy Map', pad=20)
+        else:
+            ax.set_title(title, pad=20)
+
+        plt.tight_layout()
+
+        # Save if requested
+        if save_plot:
+            if output_dir is None:
+                output_dir = "."
+            Path(output_dir).mkdir(exist_ok=True, parents=True)
+            plot_filename = f"{output_dir}/{self.mouse_id}_{self.session_id}_occupancy.png"
+            plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+            if self.verbose:
+                print(f"Saved: {plot_filename}")
+
+        return fig, {
+            'occupancy_map': occupancy_map,
+            'occupancy_map_display': occupancy_map_display
+        }
+
+    def compute_rate_map(self, cluster_index, bin_size=50.7, sigma=0, min_occupancy=0.1,
+                        fixed_arena_bounds=None, flip_state=None, filter_flip_state=True,
+                        return_metadata=True):
+        """
+        Compute spatial firing rate map for a specific cluster.
+
+        Parameters:
+        -----------
+        cluster_index : int
+            Index of the cluster to analyze
+        bin_size : float
+            Spatial bin size in pixels (default: 50.7 = 1 cm)
+        sigma : float
+            Gaussian smoothing sigma (default: 0 = no smoothing)
+        min_occupancy : float
+            Minimum occupancy threshold in seconds
+        fixed_arena_bounds : tuple, optional
+            Fixed arena bounds (x_min, x_max, y_min, y_max)
+        flip_state : bool, optional
+            Filter by flip_state column. If None, use all data. If True or False,
+            only include events and spikes where flip_state matches this value.
+            Only applies if filter_flip_state=True.
+        filter_flip_state : bool
+            Whether to apply flip_state filtering (default: True). If False,
+            ignores flip_state parameter and uses all data without filtering.
+        return_metadata : bool
+            Whether to return metadata dict (default: True)
+
+        Returns:
+        --------
+        rate_map : numpy.ndarray
+            2D array of firing rates (spikes/sec) for each spatial bin
+        metadata : dict (if return_metadata=True)
+            Dictionary containing:
+            - 'spatial_info': spatial information in bits/spike
+            - 'mean_rate': mean firing rate
+            - 'total_spikes': total number of spikes
+            - 'total_time': total time in valid bins
+            - 'occupancy_map': occupancy map used
+            - 'spike_map': spike count map
+            - 'valid_bins': boolean mask of valid bins
+            - 'x_edges', 'y_edges': bin edges
+            - 'x_min', 'x_max', 'y_min', 'y_max': arena bounds
+
+        Examples:
+        ---------
+        >>> # Compute rate map for cluster 0
+        >>> rate_map, metadata = session.compute_rate_map(0)
+        >>> print(f"Spatial info: {metadata['spatial_info']:.3f} bits/spike")
+        >>>
+        >>> # Compute rate map for flip_state=True only
+        >>> rate_map_flip, metadata = session.compute_rate_map(0, flip_state=True)
+        >>>
+        >>> # Get true combined rate map (no filtering)
+        >>> rate_map_all, metadata = session.compute_rate_map(0, filter_flip_state=False)
+        """
+        if cluster_index not in self.clusters:
+            raise ValueError(f"Cluster index {cluster_index} not found")
+
+        if self.events.empty:
+            raise ValueError("No events data available")
+
+        # Extract all position data first (needed for spike filtering)
+        all_positions_array = self.events[[self.position_x, self.position_y]].values
+        all_pos_times_array = self.events['timestamp_ms'].values
+        spike_times_array = self.clusters[cluster_index]['spike_times']
+
+        # Filter spikes by flip_state if requested
+        if filter_flip_state and flip_state is not None:
+            if 'flip_state' not in self.events.columns:
+                raise ValueError("Events DataFrame must contain 'flip_state' column for flip_state filtering")
+
+            # For each spike, find the nearest event time and check its flip_state
+            # Use searchsorted to find the nearest event index for each spike
+            spike_event_indices = np.searchsorted(all_pos_times_array, spike_times_array, side='left')
+            # Clip to valid range
+            spike_event_indices = np.clip(spike_event_indices, 0, len(all_pos_times_array) - 1)
+
+            # Get flip_state values for these events
+            spike_flip_states = self.events['flip_state'].values[spike_event_indices]
+
+            # Filter spikes to only those matching the desired flip_state
+            spike_mask = spike_flip_states == flip_state
+            spike_times_array = spike_times_array[spike_mask]
+
+            # Also filter events for position data
+            events_filtered = self.events[self.events['flip_state'] == flip_state].copy()
+            if len(events_filtered) == 0:
+                raise ValueError(f"No events found with flip_state={flip_state}")
+        else:
+            events_filtered = self.events
+
+        # Extract position data from filtered events
+        positions_array = events_filtered[[self.position_x, self.position_y]].values
+        pos_times_array = events_filtered['timestamp_ms'].values
+
+        # Calculate arena bounds
+        if fixed_arena_bounds is not None:
+            x_min, x_max, y_min, y_max = fixed_arena_bounds
+        else:
+            x_min, x_max = np.nanmin(positions_array[:, 0]), np.nanmax(positions_array[:, 0])
+            y_min, y_max = np.nanmin(positions_array[:, 1]), np.nanmax(positions_array[:, 1])
+            margin = bin_size * 0.5
+            x_min, x_max = x_min - margin, x_max + margin
+            y_min, y_max = y_min - margin, y_max + margin
+
+        # Create spatial bins
+        x_bins = int(np.ceil((x_max - x_min) / bin_size))
+        y_bins = int(np.ceil((y_max - y_min) / bin_size))
+        x_edges = np.linspace(x_min, x_max, x_bins + 1)
+        y_edges = np.linspace(y_min, y_max, y_bins + 1)
+
+        # Calculate occupancy map
+        dt = np.median(np.asarray(np.diff(pos_times_array), dtype=np.float64)) / 1000.0
+        occupancy_map, _, _ = np.histogram2d(
+            positions_array[:, 0], positions_array[:, 1],
+            bins=[x_edges, y_edges]
+        )
+        occupancy_map = occupancy_map * dt
+
+        # Filter spikes by time range
+        valid_spikes = (spike_times_array >= pos_times_array[0]) & (spike_times_array <= pos_times_array[-1])
+        filtered_spike_times = spike_times_array[valid_spikes]
+
+        # Calculate spike positions and spike map
+        if len(filtered_spike_times) > 0:
+            spike_x = np.interp(filtered_spike_times, np.asarray(pos_times_array, dtype=np.float64),
+                               positions_array[:, 0])
+            spike_y = np.interp(filtered_spike_times, np.asarray(pos_times_array, dtype=np.float64),
+                               positions_array[:, 1])
+            spike_map, _, _ = np.histogram2d(spike_x, spike_y, bins=[x_edges, y_edges])
+        else:
+            spike_map = np.zeros_like(occupancy_map)
+
+        # Calculate rate map
+        valid_bins = occupancy_map >= min_occupancy
+        rate_map = np.zeros_like(occupancy_map)
+        rate_map[valid_bins] = spike_map[valid_bins] / occupancy_map[valid_bins]
+
+        # Calculate spatial information BEFORE smoothing
+        total_spikes = len(filtered_spike_times)
+        total_time = np.sum(occupancy_map[valid_bins])
+        mean_rate = total_spikes / total_time if total_time > 0 else 0
+
+        if mean_rate > 0:
+            rate_map_array = np.asarray(rate_map, dtype=np.float64)
+            valid_rate_bins = valid_bins & (rate_map_array > 0)
+            if np.any(valid_rate_bins):
+                p_i = occupancy_map[valid_rate_bins] / total_time
+                r_i = rate_map_array[valid_rate_bins]
+                spatial_info = np.sum(p_i * (r_i / float(mean_rate)) * np.log2(r_i / float(mean_rate)))
+            else:
+                spatial_info = 0.0
+        else:
+            spatial_info = 0.0
+
+        # Apply smoothing if requested (after spatial info calculation)
+        if sigma > 0:
+            rate_map = gaussian_filter(rate_map, sigma=sigma)
+
+        if return_metadata:
+            metadata = {
+                'spatial_info': spatial_info,
+                'mean_rate': mean_rate,
+                'total_spikes': total_spikes,
+                'total_time': total_time,
+                'occupancy_map': occupancy_map,
+                'spike_map': spike_map,
+                'valid_bins': valid_bins,
+                'x_edges': x_edges,
+                'y_edges': y_edges,
+                'x_min': x_min,
+                'x_max': x_max,
+                'y_min': y_min,
+                'y_max': y_max,
+                'bin_size': bin_size
+            }
+            return rate_map, metadata
+        else:
+            return rate_map
+
+    def plot_rate_map(self, cluster_index, bin_size=50.7, sigma=0, min_occupancy=0.1,
+                     fixed_arena_bounds=None,
+                     flip_state=None,
+                     filter_flip_state=True,
+                     title=None,
+                     xlabel='X Position (cm)',
+                     ylabel='Y Position (cm)',
+                     cbar_label='Spikes/sec',
+                     cmap='viridis',
+                     vmin=None,
+                     vmax=None,
+                     use_percentile_limits=False,
+                     upsample=False,
+                     min_max_ticks_only=False,
+                     cbar_min_max_only=True,
+                     cbar_shrink=0.76,
+                     hide_all_ticks=False,
+                     hide_axis_labels=False,
+                     figsize=(6, 6),
+                     save_plot=False,
+                     output_dir=None):
+        """
+        Create rate map plot with units in cm and 90-degree rotation.
+
+        Parameters:
+        -----------
+        cluster_index : int
+            Index of the cluster to analyze
+        bin_size : float
+            Spatial bin size in pixels (default: 50.7 = 1 cm)
+        sigma : float
+            Gaussian smoothing sigma for visualization (default: 0 = no smoothing).
+            Applied after rate calculation, before display.
+        min_occupancy : float
+            Minimum occupancy threshold in seconds
+        flip_state : bool, optional
+            Filter by flip_state column. If None, use all data.
+            Only applies if filter_flip_state=True.
+        filter_flip_state : bool
+            Whether to apply flip_state filtering (default: True). If False,
+            ignores flip_state parameter and uses all data without filtering.
+        use_percentile_limits : bool
+            if True, automatically set vmin and vmax to 5th and 95th percentiles (default: False).
+        upsample : bool
+            if True, upsample the display map to native pixel resolution (default: False).
+            For visualization only, does not affect spatial information calculation.
+        save_plot : bool
+            Whether to save the plot to disk
+        output_dir : str
+            Directory to save plot (if save_plot=True)
+
+        Returns:
+        --------
+        fig : matplotlib.figure.Figure
+            The figure object
+        data : dict
+            Dictionary containing 'spatial_info', 'rate_map', and 'rate_map_display'
+        """
+        px_per_cm = 50.7
+
+        # Get cluster ID for title
+        original_cluster_id = self.clusters[cluster_index]['cluster_id']
+
+        # Extract all position data first (needed for spike filtering)
+        all_positions_array = self.events[[self.position_x, self.position_y]].values
+        all_pos_times_array = self.events['timestamp_ms'].values
+        spike_times_array = self.clusters[cluster_index]['spike_times']
+
+        # Filter spikes by flip_state if requested
+        if filter_flip_state and flip_state is not None:
+            if 'flip_state' not in self.events.columns:
+                raise ValueError("Events DataFrame must contain 'flip_state' column for flip_state filtering")
+
+            # For each spike, find the nearest event time and check its flip_state
+            # Use searchsorted to find the nearest event index for each spike
+            spike_event_indices = np.searchsorted(all_pos_times_array, spike_times_array, side='left')
+            # Clip to valid range
+            spike_event_indices = np.clip(spike_event_indices, 0, len(all_pos_times_array) - 1)
+
+            # Get flip_state values for these events
+            spike_flip_states = self.events['flip_state'].values[spike_event_indices]
+
+            # Filter spikes to only those matching the desired flip_state
+            spike_mask = spike_flip_states == flip_state
+            spike_times_array = spike_times_array[spike_mask]
+
+            # Also filter events for position data
+            events_filtered = self.events[self.events['flip_state'] == flip_state].copy()
+            if len(events_filtered) == 0:
+                raise ValueError(f"No events found with flip_state={flip_state}")
+        else:
+            events_filtered = self.events
+
+        # Extract position data from filtered events
+        positions_array = events_filtered[[self.position_x, self.position_y]].values
+        pos_times_array = events_filtered['timestamp_ms'].values
+
+        # Calculate arena bounds
+        if fixed_arena_bounds is not None:
+            x_min, x_max, y_min, y_max = fixed_arena_bounds
+        else:
+            # Start from 0 and extend to max of data plus margin
+            x_max = np.nanmax(positions_array[:, 0])
+            y_max = np.nanmax(positions_array[:, 1])
+            margin = bin_size * 0.5
+            x_min, x_max = 0, x_max + margin
+            y_min, y_max = 0, y_max + margin
+
+        # Create spatial bins
+        x_bins = int(np.ceil((x_max - x_min) / bin_size))
+        y_bins = int(np.ceil((y_max - y_min) / bin_size))
+        x_edges = np.linspace(x_min, x_max, x_bins + 1)
+        y_edges = np.linspace(y_min, y_max, y_bins + 1)
+
+        # Calculate occupancy map (swap x and y for 90-degree rotation)
+        dt = np.median(np.asarray(np.diff(pos_times_array), dtype=np.float64)) / 1000.0
+        occupancy_map, _, _ = np.histogram2d(
+            positions_array[:, 1], positions_array[:, 0],  # Swapped: y, x instead of x, y
+            bins=[y_edges, x_edges]  # Swapped: y_edges, x_edges
+        )
+        occupancy_map = occupancy_map * dt
+
+        # Filter spikes by time range
+        valid_spikes = (spike_times_array >= pos_times_array[0]) & (spike_times_array <= pos_times_array[-1])
+        filtered_spike_times = spike_times_array[valid_spikes]
+
+        # Calculate spike positions and spike map (swap x and y)
+        if len(filtered_spike_times) > 0:
+            spike_x = np.interp(filtered_spike_times, np.asarray(pos_times_array, dtype=np.float64),
+                               positions_array[:, 0])
+            spike_y = np.interp(filtered_spike_times, np.asarray(pos_times_array, dtype=np.float64),
+                               positions_array[:, 1])
+            spike_map, _, _ = np.histogram2d(spike_y, spike_x, bins=[y_edges, x_edges])  # Swapped
+        else:
+            spike_map = np.zeros_like(occupancy_map)
+
+        # Calculate rate map
+        valid_bins = occupancy_map >= min_occupancy
+        rate_map = np.zeros_like(occupancy_map)
+        rate_map[valid_bins] = spike_map[valid_bins] / occupancy_map[valid_bins]
+
+        # Calculate spatial information BEFORE smoothing (using unsmoothed rate_map)
+        total_spikes = len(filtered_spike_times)
+        total_time = np.sum(occupancy_map[valid_bins])
+        mean_rate = total_spikes / total_time if total_time > 0 else 0
+
+        if mean_rate > 0:
+            rate_map_array = np.asarray(rate_map, dtype=np.float64)
+            valid_rate_bins = valid_bins & (rate_map_array > 0)
+            if np.any(valid_rate_bins):
+                p_i = occupancy_map[valid_rate_bins] / total_time
+                r_i = rate_map_array[valid_rate_bins]
+                spatial_info = np.sum(p_i * (r_i / float(mean_rate)) * np.log2(r_i / float(mean_rate)))
+            else:
+                spatial_info = 0.0
+        else:
+            spatial_info = 0.0
+
+        # Now apply visualization-only transformations (smoothing and upsampling)
+        if sigma > 0:
+            rate_map = gaussian_filter(rate_map, sigma=sigma)
+
+        # Create visualization array
+        rate_map_viz = np.copy(rate_map)
+        rate_map_viz[~valid_bins] = np.nan
+
+        # For display: transpose to get correct orientation
+        rate_map_display = rate_map_viz.T
+
+        # Apply upsampling for visualization if requested
+        if upsample:
+            rate_map_display = self._upsample_map(rate_map_display, zoom_factor=5)
+
+        # Use percentile limits if requested (and vmin/vmax not explicitly set)
+        if use_percentile_limits:
+            if vmin is None or vmax is None:
+                percentile_vmin, percentile_vmax = self._compute_percentile_limits(rate_map_display)
+                if vmin is None:
+                    vmin = percentile_vmin
+                if vmax is None:
+                    vmax = percentile_vmax
+        else:
+            # Default behavior: vmax from 95th percentile if not provided
+            if vmax is None:
+                if np.any(~np.isnan(rate_map_display)):
+                    valid_rates = rate_map_display[~np.isnan(rate_map_display)]
+                    vmax = np.percentile(np.asarray(valid_rates, dtype=np.float64), 95) if len(valid_rates) > 0 else 1
+                else:
+                    vmax = 1
+
+            # Set vmin to 0 if not provided
+            if vmin is None:
+                vmin = 0
+
+        # Convert extent to cm - swapped for rotation
+        extent_cm = [y_min / px_per_cm, y_max / px_per_cm,
+                     x_min / px_per_cm, x_max / px_per_cm]
+
+        # Create figure
+        fig, ax = plt.subplots(figsize=figsize)
+
+        # Plot using seaborn heatmap
+        im = sns.heatmap(rate_map_display, ax=ax, cmap=cmap,
+                         vmin=vmin, vmax=vmax,
+                         cbar_kws={'label': cbar_label, 'shrink': cbar_shrink},
+                         xticklabels=False, yticklabels=False,
+                         square=True)
+
+        # Get the colorbar to modify ticks
+        cbar = im.collections[0].colorbar
+
+        # Set colorbar ticks to min/max only if requested
+        if cbar_min_max_only:
+            cbar.set_ticks([vmin, vmax])
+
+        # Add black border around the heatmap
+        for spine in ax.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(1)
+            spine.set_visible(True)
+
+        # Manually set the extent
+        ax.set_xlim(0, rate_map_display.shape[1])
+        ax.set_ylim(0, rate_map_display.shape[0])
+
+        # Create custom tick positions for extent in cm
+        n_xticks = 2  # min and max
+        n_yticks = 2
+        xtick_positions = np.linspace(0, rate_map_display.shape[1], n_xticks)
+        ytick_positions = np.linspace(0, rate_map_display.shape[0], n_yticks)
+        xtick_labels = [f'{extent_cm[0]:.1f}', f'{extent_cm[1]:.1f}']
+        ytick_labels = [f'{extent_cm[2]:.1f}', f'{extent_cm[3]:.1f}']
+
+        # Set axis labels (unless hidden)
+        if not hide_axis_labels:
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+
+        ax.set_aspect('equal', adjustable='box')
+
+        cbar = ax.collections[0].colorbar
+        cbar.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+        cbar.outline.set_edgecolor('black')
+        cbar.outline.set_linewidth(1)
+
+        # Set min/max ticks only if requested (overrides default)
+        if min_max_ticks_only:
+            ax.set_xticks(xtick_positions)
+            ax.set_yticks(ytick_positions)
+            ax.set_xticklabels(xtick_labels)
+            ax.set_yticklabels(ytick_labels)
+
+        # Hide all ticks and tick labels if requested
+        if hide_all_ticks:
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+
+        if title is None:
+            ax.set_title(f'{self.mouse_id} {self.session_id} - Cluster {original_cluster_id}\nRate Map (SI={spatial_info:.3f} bits/spike)', pad=20)
+        else:
+            ax.set_title(title, pad=20)
+
+        plt.tight_layout()
+
+        # Save if requested
+        if save_plot:
+            if output_dir is None:
+                output_dir = "."
+            Path(output_dir).mkdir(exist_ok=True, parents=True)
+            plot_filename = f"{output_dir}/{self.mouse_id}_{self.session_id}_cluster{original_cluster_id}_ratemap.png"
+            plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+            if self.verbose:
+                print(f"Saved: {plot_filename}")
+
+        return fig, {
+            'spatial_info': spatial_info,
+            'rate_map': rate_map_viz,
+            'rate_map_display': rate_map_display
+        }
+
     def __repr__(self) -> str:
         """String representation of SessionData object."""
         return f"SessionData({self.mouse_id}_{self.session_id}, {self.n_clusters} clusters)"
