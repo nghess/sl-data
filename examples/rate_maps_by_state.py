@@ -11,7 +11,7 @@ Output files are saved as: {mouse_id}_{session_id}_cl{cluster_id}_fs_rate.png
 
 Code by Nate Gonzales-Hess, December 2024.
 """
-
+import re
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -330,7 +330,7 @@ def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50.7, 
     return stats
 
 
-def main():
+def rate_map_by_state(mouse_id='7012', session_id='m10', experiment='clickbait-motivate', base_path='D:/data/'):
     """
     Main function to generate flip_state comparison plots for all clusters.
     """
@@ -340,10 +340,10 @@ def main():
     # ============================================================================
 
     # Session parameters
-    mouse_id = '7012'
-    session_id = 'm10'
-    experiment = 'clickbait-motivate'
-    base_path = 'S:/'
+    # mouse_id = '7012'
+    # session_id = 'm10'
+    # experiment = 'clickbait-motivate'
+    # base_path = 'D:/data/'
 
     # Analysis parameters
     bin_size = 50.7  # 1 cm bins
@@ -451,6 +451,29 @@ def main():
     print(f"\nAll plots saved to: {output_dir}")
     print("\nDone!")
 
+"""Get session ids from directory structure."""
+def natural_sort_key(path):
+    path_str = str(path)
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split('([0-9]+)', path_str)]
 
-if __name__ == "__main__":
-    main()
+def get_file_paths(directory: str = '', extension: str = '', keyword: str = '', session_type: str = '', verbose=True) -> list:
+    paths = [f for f in Path(directory).glob(f'**/{session_type}*/*.{extension}') if keyword in f.name]
+    paths = sorted(paths, key=natural_sort_key)
+    if verbose:
+        print(f'Found {len(paths)} {keyword}.{extension} files')
+    return paths
+
+"""Generate rate maps by flip_state for all sessions"""
+
+base_path='D:/data/'
+experiment = "clickbait-motivate"
+events_dir = 'bonsai'
+session_paths = get_file_paths(f"{base_path}/{experiment}/{events_dir}", 'csv', 'slp', session_type='m')
+
+# Loop through each session and generate rate maps by flip_state
+for session_path in session_paths:
+    mouse_id = session_path.parent.parent.name
+    session_id = session_path.parent.name
+    print(f"\nProcessing session: {mouse_id} {session_id}")
+    rate_map_by_state(mouse_id=mouse_id, session_id=session_id, experiment=experiment, base_path=base_path)

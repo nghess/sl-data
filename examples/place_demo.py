@@ -36,7 +36,7 @@ def main():
         mouse_id='7012',
         session_id='m10',
         experiment='clickbait-motivate',
-        base_path='S:/',
+        base_path='D:/data/',
         min_spikes=250,
         verbose=True
     )
