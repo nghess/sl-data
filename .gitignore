@@ -89,6 +89,7 @@ results/
 output/
 figures/
 plots/
+rate_maps/
 
 # Temporary files
 temp/

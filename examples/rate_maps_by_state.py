@@ -195,19 +195,25 @@ def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50.7, 
     # 3. Cosine Similarity
     cos_sim = cosine_similarity(rate_map_false, rate_map_true, valid_bins_both)
 
+    # Compute shared color scale limits
+    # Get max value from both rate maps (only in valid bins)
+    max_false = np.max(rate_map_false[metadata_false['valid_bins']]) if np.any(metadata_false['valid_bins']) else 0
+    max_true = np.max(rate_map_true[metadata_true['valid_bins']]) if np.any(metadata_true['valid_bins']) else 0
+    shared_vmax = max(max_false, max_true)
+
     # Create figure with custom gridspec for better control
     from matplotlib.gridspec import GridSpec
 
     fig = plt.figure(figsize=(15, 5.5))
     gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1.2], wspace=0.3,
-                  top=0.85, bottom=0.05)
+                  top=0.82, bottom=0.05)
 
     ax_false = fig.add_subplot(gs[0, 0])
     ax_true = fig.add_subplot(gs[0, 1])
     ax_stats = fig.add_subplot(gs[0, 2])
 
     # Helper function to plot rate map on an axis
-    def plot_rate_map_on_axis(ax, rate_map, metadata, title, cmap='hot'):
+    def plot_rate_map_on_axis(ax, rate_map, metadata, title, cmap='hot', cbar=True, vmin=None, vmax=None):
         # Transpose for display (matching the 90-degree rotation)
         valid_bins = metadata['valid_bins']
         rate_map_viz = np.copy(rate_map)
@@ -221,24 +227,25 @@ def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50.7, 
 
         # Plot
         im = ax.imshow(rate_map_display, cmap=cmap, aspect='equal', origin='lower',
-                      interpolation='nearest')
+                      interpolation='nearest', vmin=vmin, vmax=vmax)
         ax.set_title(f'{title}\nSI={spatial_info:.3f} bits/spike\n'
                     f'{n_spikes} spikes, {mean_rate:.2f} Hz',
                     fontsize=10)
         ax.axis('off')
 
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
-        cbar.set_label('Spikes/sec', fontsize=8)
-        cbar.ax.tick_params(labelsize=7)
-        cbar.outline.set_edgecolor('black')
-        cbar.outline.set_linewidth(1)
+        if cbar:
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax, shrink=1, pad=0.1)
+            cbar.set_label('Spikes/sec', fontsize=8)
+            cbar.ax.tick_params(labelsize=7)
+            cbar.outline.set_edgecolor('black')
+            cbar.outline.set_linewidth(1)
 
-    # Plot the two conditions
+    # Plot the two conditions with shared color scale
     plot_rate_map_on_axis(ax_false, rate_map_false, metadata_false,
-                          f'flip_state = False')
+                          f'flip_state = 0', cbar=False, vmin=0, vmax=shared_vmax)
     plot_rate_map_on_axis(ax_true, rate_map_true, metadata_true,
-                          f'flip_state = True')
+                          f'flip_state = 1', vmin=0, vmax=shared_vmax)
 
     # Statistics panel
     ax_stats.axis('off')
@@ -268,14 +275,7 @@ def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50.7, 
     if not np.isnan(r_corr):
         stats_text += f"  r = {r_corr:.3f}\n"
         stats_text += f"  p = {p_corr:.4f}\n"
-        if p_corr < 0.001:
-            stats_text += "  ***\n"
-        elif p_corr < 0.01:
-            stats_text += "  **\n"
-        elif p_corr < 0.05:
-            stats_text += "  *\n"
-        else:
-            stats_text += "  n.s.\n"
+
     else:
         stats_text += "  N/A\n"
 
