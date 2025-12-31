@@ -129,7 +129,7 @@ def cosine_similarity(rate_map_1, rate_map_2, valid_bins):
     return cos_sim
 
 
-def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50.7, sigma=1):
+def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50, sigma=1):
     """
     Create and save flip_state comparison plot for a single cluster.
 
@@ -154,12 +154,30 @@ def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50.7, 
     # Get cluster ID for filename
     original_cluster_id = session.clusters[cluster_idx]['cluster_id']
 
+    # First, compute arena bounds using ALL data (combined) to ensure consistent grid
+    _, metadata_combined = session.compute_rate_map(
+        cluster_index=cluster_idx,
+        bin_size=bin_size,
+        sigma=0,  # No smoothing for bounds calculation
+        filter_flip_state=False,  # Use all data
+        return_metadata=True
+    )
+
+    # Extract fixed arena bounds from combined data
+    fixed_bounds = (
+        metadata_combined['x_min'] + bin_size,
+        metadata_combined['x_max'] - bin_size,
+        metadata_combined['y_min'] + bin_size,
+        metadata_combined['y_max'] - bin_size
+    )
+
     # Compute rate maps for each condition
     rate_map_false, metadata_false = session.compute_rate_map(
         cluster_index=cluster_idx,
         bin_size=bin_size,
         sigma=sigma,
         flip_state=False,
+        fixed_arena_bounds=fixed_bounds,
         return_metadata=True
     )
 
@@ -168,6 +186,7 @@ def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50.7, 
         bin_size=bin_size,
         sigma=sigma,
         flip_state=True,
+        fixed_arena_bounds=fixed_bounds,
         return_metadata=True
     )
 
@@ -274,7 +293,6 @@ def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50.7, 
     stats_text += "Spatial Correlation:\n"
     if not np.isnan(r_corr):
         stats_text += f"  r = {r_corr:.3f}\n"
-        stats_text += f"  p = {p_corr:.4f}\n"
 
     else:
         stats_text += "  N/A\n"
@@ -301,7 +319,7 @@ def plot_flip_state_comparison(session, cluster_idx, output_dir, bin_size=50.7, 
                  bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.15))
 
     # Main title with more vertical space
-    plt.suptitle(f'{session.mouse_id} {session.session_id} - Cluster {original_cluster_id} - flip_state Comparison',
+    plt.suptitle(f'{session.mouse_id} {session.session_id} - Cluster {original_cluster_id} - Ch. {session.clusters[cluster_idx]['best_channel']} - flip_state Comparison',
                 fontsize=14, y=0.98)
 
     # Save figure
@@ -346,7 +364,7 @@ def rate_map_by_state(mouse_id='7012', session_id='m10', experiment='clickbait-m
     # base_path = 'D:/data/'
 
     # Analysis parameters
-    bin_size = 50.7  # 1 cm bins
+    bin_size = 100  # 50.7px = 1 cm
     sigma = 1  # Smoothing for visualization
 
     # Output directory
