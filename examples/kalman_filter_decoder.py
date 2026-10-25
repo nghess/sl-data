@@ -7,15 +7,21 @@ resolution of the video tracking (≈33 fps).
 
 State-space model
 -----------------
-    State:       z_t = [x, y, vx, vy]^T          (position + velocity)
+    State:       z_t = [x, y]^T                  (position only)
     Transition:  z_t  = A * z_{t-1} + w_t,   w_t ~ N(0, W)
     Observation: n_t  = H * z_t   + q_t,     q_t ~ N(0, Q)
 
 where n_t is the N-dimensional population firing-rate vector.
 
-All parameters (A, W, H, Q) are estimated from training data via
-ordinary least squares.  The filter is then run forward on held-out
-test data using the standard Kalman predict/update recursion.
+A is a diagonal AR(1) matrix diag(α_x, α_y) estimated from the lag-1
+autocorrelation of each position coordinate.  α < 1 encodes the physical
+constraint that animal position is a stationary (mean-reverting) process
+in an enclosed arena, preventing drift accumulation.
+
+H is estimated via Ridge regression; Q is diagonal (per-neuron obs noise).
+The filter gain can optionally be fixed at its steady-state value K_inf by
+solving the discrete algebraic Riccati equation (DARE), which eliminates
+the high-gain transient at startup and reduces per-step computation.
 
 References
 ----------
@@ -27,7 +33,8 @@ Code by Nate Gonzales-Hess.
 
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, chi2 as chi2_dist
+from scipy.linalg import solve_discrete_are
 from scipy.ndimage import gaussian_filter1d
 from sklearn.metrics import r2_score
 from sklearn.linear_model import Ridge
@@ -50,39 +57,91 @@ class KalmanFilterDecoder:
     ----------
     neural_smooth_sigma : float
         Std of Gaussian kernel (in bins) applied to neural activity before
-        fitting H and before decoding.  Equivalent to temporal integration
-        that improves SNR without sacrificing much spatial resolution.
-        Set to 0 to disable.  Default: 2.
+        fitting H and before decoding.  Set to 0 to disable.  Default: 2.
     pos_smooth_sigma : float
         Std of Gaussian kernel (in bins) applied to position labels before
-        fitting H.  Reduces tracking jitter in the SLEAP output.
-        Set to 0 to disable.  Default: 2.
+        fitting H.  Reduces SLEAP tracking jitter.  Set to 0 to disable.
+        Default: 2.
+    ar1_alpha : float or None
+        AR(1) coefficient used for the state transition A = diag(α_x, α_y).
+        If None (default), α is estimated per-axis from the lag-1
+        autocorrelation of the training positions.  Set to a fixed value in
+        (0, 1) to override (e.g. 0.98 for strong temporal smoothing).
+    use_steady_state_gain : bool
+        If True, pre-compute the optimal steady-state Kalman gain K_inf by
+        solving the discrete algebraic Riccati equation (DARE) during fit().
+        The recursive P update is then skipped in decode(), replacing the
+        time-varying gain with a fixed K_inf.  Eliminates the high-gain
+        transient at startup and speeds up decoding.  Default: False.
+    bias_ema_lambda : float
+        If > 0, subtract a running exponential moving average of the innovation
+        before each Kalman update.  Removes slow drift caused by a shift in the
+        test-set neural activity distribution relative to training.  τ ≈ 1/(1-λ)
+        bins (e.g. λ=0.99 → τ≈100 bins≈3 s at 30 ms).  Default: 0.0 (off).
 
     Attributes
     ----------
     A : np.ndarray, shape (2, 2)
-        State transition matrix.
+        Diagonal AR(1) state transition matrix diag(α_x, α_y).
     W : np.ndarray, shape (2, 2)
         Process noise covariance.
     H : np.ndarray, shape (n_neurons, 2)
         Observation matrix.
     Q : np.ndarray, shape (n_neurons, n_neurons)
         Observation noise covariance (diagonal approximation).
+    K_inf : np.ndarray, shape (2, n_neurons) or None
+        Steady-state Kalman gain (only set when use_steady_state_gain=True).
+    P_inf : np.ndarray, shape (2, 2) or None
+        Steady-state predicted covariance from DARE solution.
     """
 
     def __init__(self, neural_smooth_sigma: float = 2.0,
-                 pos_smooth_sigma: float = 2.0):
-        self.neural_smooth_sigma = neural_smooth_sigma
-        self.pos_smooth_sigma    = pos_smooth_sigma
-        self.A = None
-        self.W = None
-        self.H = None
-        self.Q = None
+                 pos_smooth_sigma: float = 2.0,
+                 ridge_alpha: float = 1.0,
+                 obs_noise_scale: float = 1.0,
+                 mahal_gate_percentile: float = 0.0,
+                 ar1_alpha: float = None,
+                 use_steady_state_gain: bool = False,
+                 bias_ema_lambda: float = 0.0):
+        self.neural_smooth_sigma   = neural_smooth_sigma
+        self.pos_smooth_sigma      = pos_smooth_sigma
+        self.ridge_alpha           = ridge_alpha
+        self.obs_noise_scale       = obs_noise_scale
+        # mahal_gate_percentile > 0 enables scalar Mahalanobis innovation gating.
+        # The innovation v = n_t - H z_pred has squared Mahalanobis distance
+        # chi2 = v^T S^{-1} v ~ chi2(n_neurons) under the model.  If chi2
+        # exceeds the given percentile of that distribution, the innovation is
+        # soft-scaled down so its effective Mahalanobis distance equals the
+        # threshold.  This is more principled than per-neuron clipping because
+        # it respects the full observation covariance S and targets whole-bin
+        # outliers (noise bursts, tracking dropouts) rather than individual neurons.
+        # Good starting value: 0.99.  Default 0.0 (off).
+        self.mahal_gate_percentile = mahal_gate_percentile
+        self.ar1_alpha             = ar1_alpha
+        self.use_steady_state_gain = use_steady_state_gain
+        # bias_ema_lambda > 0 enables online innovation bias correction.
+        # A running EMA of the innovation vector tracks slow drift in the
+        # neural-activity distribution and is subtracted each step before
+        # the Kalman update.  λ controls the time constant: τ ≈ 1/(1-λ) bins
+        # (e.g. λ=0.99 → τ≈100 bins≈3 s at 30 ms bins).  Default 0.0 (off).
+        self.bias_ema_lambda       = bias_ema_lambda
+        self.A     = None
+        self.W     = None
+        self.H     = None
+        self.Q     = None
+        self.K_inf = None   # steady-state gain (set when use_steady_state_gain=True)
+        self.P_inf = None   # steady-state predicted covariance
+        self.S_inf = None   # steady-state innovation covariance
         # Position normalisation stats (set during fit, used to denormalise decoded output)
         self.pos_x_mean = 0.0
         self.pos_x_std  = 1.0
         self.pos_y_mean = 0.0
         self.pos_y_std  = 1.0
+        # Normalised position bounds for state clipping (set during fit)
+        self.pos_x_min_norm = -np.inf
+        self.pos_x_max_norm =  np.inf
+        self.pos_y_min_norm = -np.inf
+        self.pos_y_max_norm =  np.inf
         self.is_fitted = False
 
     # ------------------------------------------------------------------
@@ -130,23 +189,46 @@ class KalmanFilterDecoder:
         px = (positions_x - self.pos_x_mean) / self.pos_x_std
         py = (positions_y - self.pos_y_mean) / self.pos_y_std
 
+        # Store arena bounds in normalised space for state clipping during decode
+        self.pos_x_min_norm = float(np.min(px))
+        self.pos_x_max_norm = float(np.max(px))
+        self.pos_y_min_norm = float(np.min(py))
+        self.pos_y_max_norm = float(np.max(py))
+
         # State matrix Z: rows are [x, y] — position only (no velocity).
-        # Omitting velocity avoids divergence from noisy finite-difference
-        # estimates; the transition model becomes a random walk (A ≈ I).
         Z = np.column_stack([px, py])  # (n_time, 2)
 
         # ------------------------------------------------------------------
-        # Estimate state transition matrix A
-        # Model: z_t = A * z_{t-1}  =>  Z[1:] ≈ Z[:-1] @ A.T
+        # AR(1) state transition: z_t = A z_{t-1} + w_t,  A = diag(α_x, α_y)
+        #
+        # Animal position in an enclosed arena is a stationary (mean-reverting)
+        # process — the animal cannot leave the arena.  Modelling this as an
+        # AR(1) / Ornstein-Uhlenbeck process with α < 1 provides a restoring
+        # force toward the arena centre (z = 0 in normalised coordinates) at
+        # every step, preventing drift accumulation over long decode windows.
+        #
+        # A random walk (A = I) has no restoring force: any small systematic
+        # bias in the Kalman gain accumulates without bound.  The AR(1) model
+        # is the correct stationary prior for bounded exploration.
+        #
+        # α is estimated per-axis from the lag-1 autocorrelation of training
+        # positions.  At 30 ms bins this is typically 0.95–0.99.
         # ------------------------------------------------------------------
         Z_curr = Z[1:]   # (n_time-1, 2)
         Z_prev = Z[:-1]  # (n_time-1, 2)
 
-        A_T, _, _, _ = np.linalg.lstsq(Z_prev, Z_curr, rcond=None)
-        self.A = A_T.T   # (2, 2)
+        if self.ar1_alpha is not None:
+            alpha_x = alpha_y = float(self.ar1_alpha)
+        else:
+            alpha_x = float(np.corrcoef(px[:-1], px[1:])[0, 1])
+            alpha_y = float(np.corrcoef(py[:-1], py[1:])[0, 1])
+        # Clamp to (0, 1): negative values would be unusual/noisy; ≥ 1 unstable.
+        alpha_x = float(np.clip(alpha_x, 0.0, 1.0 - 1e-4))
+        alpha_y = float(np.clip(alpha_y, 0.0, 1.0 - 1e-4))
+        self.A = np.diag([alpha_x, alpha_y])
 
-        # Process noise covariance W from state-transition residuals
-        residuals_state = Z_curr - Z_prev @ A_T   # (n_time-1, 2)
+        # Process noise W from AR(1) residuals
+        residuals_state = Z_curr - Z_prev @ self.A.T   # (n_time-1, 2)
         self.W = np.cov(residuals_state.T) + np.eye(2) * 1e-6  # (2, 2)
 
         # ------------------------------------------------------------------
@@ -154,7 +236,7 @@ class KalmanFilterDecoder:
         # Model: n_t = H * z_t  =>  population_matrix ≈ Z @ H.T
         # Ridge avoids near-zero H entries for neurons with weak spatial tuning.
         # ------------------------------------------------------------------
-        ridge = Ridge(alpha=1.0, fit_intercept=False)
+        ridge = Ridge(alpha=self.ridge_alpha, fit_intercept=False)
         ridge.fit(Z, population_matrix)      # fits all neurons jointly
         self.H = ridge.coef_                 # (n_neurons, 2)
 
@@ -162,17 +244,46 @@ class KalmanFilterDecoder:
         residuals_obs = population_matrix - Z @ self.H.T   # (n_time, n_neurons)
         obs_var = np.var(residuals_obs, axis=0)        # (n_neurons,)
         obs_var = np.maximum(obs_var, 1e-6)            # avoid zero variance
-        self.Q = np.diag(obs_var)                      # (n_neurons, n_neurons)
+        # obs_noise_scale multiplies Q directly, which reduces the Kalman gain
+        # K = P H^T (H P H^T + Q)^{-1} without the ridge_alpha / Q coupling.
+        # Values > 1 make the filter trust observations less → fewer overshoots.
+        self.Q = np.diag(obs_var) * self.obs_noise_scale  # (n_neurons, n_neurons)
+
+        # ------------------------------------------------------------------
+        # Optional: steady-state Kalman gain via DARE
+        #
+        # Solve the discrete algebraic Riccati equation for the steady-state
+        # predicted covariance P_inf.  scipy.linalg.solve_discrete_are solves:
+        #   A^T X A - X - (A^T X B)(B^T X B + R)^{-1}(B^T X A) + Q = 0
+        # Mapping to the Kalman DARE (predictor form):
+        #   a = A^T,  b = H^T,  q = W,  r = Q_obs
+        # P_inf is (2, 2) regardless of n_neurons — the DARE is in state space.
+        # ------------------------------------------------------------------
+        if self.use_steady_state_gain:
+            P_inf = solve_discrete_are(self.A.T, self.H.T, self.W, self.Q)
+            S_inf = self.H @ P_inf @ self.H.T + self.Q   # (n_neurons, n_neurons)
+            self.K_inf = np.linalg.solve(S_inf, self.H @ P_inf).T  # (2, n_neurons)
+            self.P_inf = P_inf
+            self.S_inf = S_inf
 
         self.is_fitted = True
+        src = "fixed" if self.ar1_alpha is not None else "estimated"
         print(f"Kalman filter fitted: {n_time} training bins, {n_neurons} neurons")
+        print(f"  AR(1) α_x = {alpha_x:.4f}, α_y = {alpha_y:.4f}  ({src})")
         print(f"  State noise std (x,y): {np.sqrt(self.W[0,0]):.3f}, {np.sqrt(self.W[1,1]):.3f}")
-        print(f"  Median obs noise std:  {np.median(np.sqrt(obs_var)):.3f}")
+        print(f"  Median obs noise std:  {np.median(np.sqrt(obs_var)):.3f}  "
+              f"(×{self.obs_noise_scale} → {np.median(np.sqrt(obs_var)) * np.sqrt(self.obs_noise_scale):.3f} effective)")
+        print(f"  H norm (Frobenius):    {np.linalg.norm(self.H):.4f}  "
+              f"(ridge_alpha={self.ridge_alpha})")
+        if self.use_steady_state_gain:
+            print(f"  Steady-state gain:     K_inf norm = {np.linalg.norm(self.K_inf):.4f}  "
+                  f"P_inf diag = [{self.P_inf[0,0]:.4f}, {self.P_inf[1,1]:.4f}]")
 
     # ------------------------------------------------------------------
     def decode(self, population_matrix: np.ndarray,
                initial_state: np.ndarray = None,
-               initial_cov: np.ndarray = None):
+               initial_cov: np.ndarray = None,
+               clip_to_bounds: bool = False):
         """
         Decode position from population activity using the Kalman filter.
 
@@ -184,6 +295,14 @@ class KalmanFilterDecoder:
             Initial [x, y] in normalised units.  Defaults to zeros.
         initial_cov : np.ndarray, shape (2, 2), optional
             Initial state covariance.  Defaults to 10 × I.
+        clip_to_bounds : bool
+            If True, clip the state vector after each update to the normalised
+            position bounds seen during training.  Prevents the filter from
+            drifting outside the arena, but note this is a hard constraint that
+            is inconsistent with the covariance P.  Default False (off).
+
+        Note: mahal_gate_percentile is set at construction time and applied
+        automatically here if > 0.
 
         Returns
         -------
@@ -200,39 +319,87 @@ class KalmanFilterDecoder:
                 sigma=self.neural_smooth_sigma, axis=0
             )
 
-        n_time = population_matrix.shape[0]
+        n_time, n_neurons = population_matrix.shape
         A, W, H, Q = self.A, self.W, self.H, self.Q
         n_state = A.shape[0]
         I = np.eye(n_state)
 
-        # Initialise state and covariance (in normalised position units)
+        # Pre-compute chi2 threshold once (depends only on n_neurons and percentile)
+        chi2_threshold = (chi2_dist.ppf(self.mahal_gate_percentile, df=n_neurons)
+                          if self.mahal_gate_percentile > 0 else None)
+
+        # Initialise state (in normalised position units)
         z = np.zeros(n_state) if initial_state is None else initial_state.copy()
-        P = np.eye(n_state) * 10.0 if initial_cov is None else initial_cov.copy()
+
+        # Steady-state mode: K and S are fixed; no P recursion needed.
+        # Recursive mode: initialise P and update it each step.
+        if self.use_steady_state_gain:
+            K_fixed = self.K_inf    # (2, n_neurons)
+            S_fixed = self.S_inf    # (n_neurons, n_neurons)
+        else:
+            P = np.eye(n_state) * 10.0 if initial_cov is None else initial_cov.copy()
 
         pred_x_norm = np.empty(n_time)
         pred_y_norm = np.empty(n_time)
 
+        # EMA bias state: tracks the running mean of the innovation vector.
+        # Initialised to zero; warms up over the first ~τ = 1/(1-λ) bins.
+        innovation_bias = np.zeros(n_neurons)
+
         for t in range(n_time):
             # --- Predict ---
             z_pred = A @ z
-            P_pred = A @ P @ A.T + W
 
-            # --- Update ---
-            # Innovation covariance S = H P H^T + Q  (n_neurons × n_neurons)
-            HP = H @ P_pred                          # (n_neurons, n_state)
-            S  = HP @ H.T + Q                        # (n_neurons, n_neurons)
+            # --- Gain and innovation covariance ---
+            if self.use_steady_state_gain:
+                K = K_fixed
+                S = S_fixed
+            else:
+                P_pred = A @ P @ A.T + W
+                HP = H @ P_pred              # (n_neurons, n_state)
+                S  = HP @ H.T + Q            # (n_neurons, n_neurons)
+                K  = np.linalg.solve(S, HP).T  # (n_state, n_neurons)
 
-            # Kalman gain K = P H^T S^{-1}  (n_state × n_neurons)
-            K = np.linalg.solve(S, HP).T             # (n_state, n_neurons)
-
-            # State update
+            # --- Innovation ---
             innovation = population_matrix[t] - H @ z_pred
+
+            # Online innovation bias correction (EMA).
+            # Update the bias estimate with the raw innovation, then subtract
+            # it.  Removing the slow-varying mean before the Kalman update
+            # prevents systematic distribution drift from accumulating into
+            # the state.  The EMA is updated before gating so it tracks the
+            # true running mean of innovations, not the clipped version.
+            if self.bias_ema_lambda > 0:
+                innovation_bias = (self.bias_ema_lambda * innovation_bias
+                                   + (1 - self.bias_ema_lambda) * innovation)
+                innovation = innovation - innovation_bias
+
+            # Scalar Mahalanobis innovation gating.
+            # Under the model, chi2 = v^T S^{-1} v ~ chi2(n_neurons).
+            # If chi2 exceeds the threshold, the bin is a population-level
+            # outlier (noise burst, tracking dropout).  We soft-scale the
+            # innovation so its effective Mahalanobis distance equals the
+            # threshold, preserving direction while limiting magnitude.
+            if chi2_threshold is not None:
+                S_inv_v = np.linalg.solve(S, innovation)
+                mahal_sq = float(innovation @ S_inv_v)
+                if mahal_sq > chi2_threshold:
+                    innovation = innovation * np.sqrt(chi2_threshold / mahal_sq)
+
+            # --- State update ---
             z = z_pred + K @ innovation
 
-            # Joseph stabilized covariance update — keeps P positive-definite
-            # under floating-point errors: P = (I-KH) P (I-KH)^T + K Q K^T
-            IKH = I - K @ H
-            P = IKH @ P_pred @ IKH.T + K @ Q @ K.T
+            # --- Covariance update (recursive mode only) ---
+            # Joseph-stabilised form keeps P positive-definite under
+            # floating-point errors: P = (I-KH) P (I-KH)^T + K Q K^T
+            if not self.use_steady_state_gain:
+                IKH = I - K @ H
+                P = IKH @ P_pred @ IKH.T + K @ Q @ K.T
+
+            # Clip state to training-data bounds to prevent arena overshoot.
+            if clip_to_bounds:
+                z[0] = np.clip(z[0], self.pos_x_min_norm, self.pos_x_max_norm)
+                z[1] = np.clip(z[1], self.pos_y_min_norm, self.pos_y_max_norm)
 
             pred_x_norm[t] = z[0]
             pred_y_norm[t] = z[1]
@@ -287,6 +454,88 @@ class KalmanFilterDecoder:
         pred_x = pred_norm[:, 0] * self.pos_x_std + self.pos_x_mean
         pred_y = pred_norm[:, 1] * self.pos_y_std + self.pos_y_mean
         return pred_x, pred_y
+
+
+# ---------------------------------------------------------------------------
+# Statistical significance — circular-shift permutation test
+# ---------------------------------------------------------------------------
+
+def permutation_test(true_x: np.ndarray, true_y: np.ndarray,
+                     pred_x: np.ndarray, pred_y: np.ndarray,
+                     n_permutations: int = 1000,
+                     seed: int = 42):
+    """
+    Circular-shift permutation test for above-chance decoding accuracy.
+
+    The true position trace is circularly shifted by a random amount on each
+    permutation, preserving its temporal autocorrelation (i.e. the animal
+    still moves smoothly, just misaligned with the neural data).  This gives
+    a conservative null distribution: if the decoder beats it, the correlation
+    is not just due to slow position trends or auto-correlation artefacts.
+
+    Parameters
+    ----------
+    true_x, true_y : np.ndarray, shape (n_time,)
+        Ground-truth position on the test set.
+    pred_x, pred_y : np.ndarray, shape (n_time,)
+        Decoded position on the test set.
+    n_permutations : int
+        Number of shuffles.  Default 1000.
+    seed : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    results : dict with keys
+        corr_x, corr_y           — true Pearson r for X and Y
+        null_corr_x, null_corr_y — arrays of null-distribution correlations
+        p_x, p_y                 — one-tailed p-values (fraction of null ≥ true r)
+        pct_x, pct_y             — percentile of true r in null distribution
+        true_euclid              — true mean Euclidean error (px)
+        null_euclid              — array of null mean Euclidean errors
+        p_euclid                 — one-tailed p-value (fraction of null ≤ true error)
+        pct_euclid               — percentile of true error in null (lower = more significant)
+    """
+    rng = np.random.default_rng(seed)
+    n = len(true_x)
+
+    true_corr_x, _ = pearsonr(true_x, pred_x)
+    true_corr_y, _ = pearsonr(true_y, pred_y)
+    true_euclid = float(np.mean(np.sqrt((true_x - pred_x) ** 2 +
+                                        (true_y - pred_y) ** 2)))
+
+    null_corr_x  = np.empty(n_permutations)
+    null_corr_y  = np.empty(n_permutations)
+    null_euclid  = np.empty(n_permutations)
+
+    for i in range(n_permutations):
+        shift = rng.integers(1, n)          # never shift by 0
+        sx = np.roll(true_x, shift)
+        sy = np.roll(true_y, shift)
+        null_corr_x[i], _ = pearsonr(sx, pred_x)
+        null_corr_y[i], _ = pearsonr(sy, pred_y)
+        null_euclid[i] = float(np.mean(np.sqrt((sx - pred_x) ** 2 +
+                                               (sy - pred_y) ** 2)))
+
+    p_x = float(np.mean(null_corr_x >= true_corr_x))
+    p_y = float(np.mean(null_corr_y >= true_corr_y))
+    # Lower Euclidean error is better, so p = fraction of null ≤ true error
+    p_euclid = float(np.mean(null_euclid <= true_euclid))
+
+    # Percentile of true value within null (higher = more significant for r;
+    # lower = more significant for error)
+    pct_x      = float(np.mean(null_corr_x < true_corr_x) * 100)
+    pct_y      = float(np.mean(null_corr_y < true_corr_y) * 100)
+    pct_euclid = float(np.mean(null_euclid  < true_euclid) * 100)
+
+    return dict(
+        corr_x=true_corr_x, corr_y=true_corr_y,
+        null_corr_x=null_corr_x, null_corr_y=null_corr_y,
+        p_x=p_x, p_y=p_y,
+        pct_x=pct_x, pct_y=pct_y,
+        true_euclid=true_euclid, null_euclid=null_euclid,
+        p_euclid=p_euclid, pct_euclid=pct_euclid,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -361,9 +610,19 @@ def prepare_data(session: SessionData, bin_size_ms: float = 30.0,
 
 def plot_results(true_x, true_y, pred_x, pred_y, time_s,
                  corr_x, corr_y, r2_x, r2_y, mean_err,
-                 mouse_id, session_id):
-    """Four-panel summary of Kalman filter decoding performance."""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+                 mouse_id, session_id,
+                 perm_results: dict = None,
+                 save_path: str = None):
+    """
+    Summary figure for Kalman filter decoding performance.
+
+    Produces a 2×2 grid (4 panels) when perm_results is None, or a 2×3 grid
+    (6 panels) when permutation-test results are provided — replacing the error
+    histogram with the Euclidean permutation test and adding X/Y null
+    distribution histograms in the right column.
+    """
+    ncols = 3 if perm_results is not None else 2
+    fig, axes = plt.subplots(2, ncols, figsize=(7 * ncols, 9))
     fig.suptitle(
         f"Kalman Filter Position Decoding — {mouse_id}_{session_id}",
         fontsize=13, fontweight='bold'
@@ -398,19 +657,60 @@ def plot_results(true_x, true_y, pred_x, pred_y, time_s,
     ax.set_title(f'X  r = {corr_x:.3f},  R² = {r2_x:.3f}')
     ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
 
-    # 4. Euclidean error distribution
+    # 4. Euclidean error histogram (fallback) or permutation test (when available)
     ax = axes[1, 1]
-    errors = np.sqrt((true_x - pred_x) ** 2 + (true_y - pred_y) ** 2)
-    ax.hist(errors, bins=40, color='slategray', edgecolor='white', alpha=0.85)
-    ax.axvline(mean_err, color='red', ls='--',
-               label=f'Mean = {mean_err:.1f} px')
-    ax.set_xlabel('Euclidean position error (px)')
-    ax.set_ylabel('Count')
-    ax.set_title(f'Error distribution  (Y: r = {corr_y:.3f}, R² = {r2_y:.3f})')
-    ax.legend(); ax.grid(True, alpha=0.3)
+    if perm_results is not None:
+        null_e = perm_results['null_euclid']
+        true_e = perm_results['true_euclid']
+        p_e    = perm_results['p_euclid']
+        pct_e  = perm_results['pct_euclid']
+        ax.hist(null_e, bins=30, color='slategray', edgecolor='white', alpha=0.8,
+                label='Null (circular shifts)')
+        ax.axvline(true_e, color='tomato', lw=2,
+                   label=f'True = {true_e:.1f} px\np = {p_e:.4f}\n({pct_e:.1f}th pct)')
+        ax.set_xlabel('Mean Euclidean error (px)')
+        ax.set_ylabel('Count')
+        ax.set_title('Permutation test — Euclidean error')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+    else:
+        errors = np.sqrt((true_x - pred_x) ** 2 + (true_y - pred_y) ** 2)
+        ax.hist(errors, bins=40, color='slategray', edgecolor='white', alpha=0.85)
+        ax.axvline(mean_err, color='red', ls='--', label=f'Mean = {mean_err:.1f} px')
+        ax.set_xlabel('Euclidean position error (px)')
+        ax.set_ylabel('Count')
+        ax.set_title(f'Error distribution  (Y: r = {corr_y:.3f}, R² = {r2_y:.3f})')
+        ax.legend(); ax.grid(True, alpha=0.3)
+
+    # 5–6. X and Y correlation permutation test panels (only when provided)
+    if perm_results is not None:
+        for row, (coord, key_null, key_r, key_p, key_pct) in enumerate([
+            ('X', 'null_corr_x', 'corr_x', 'p_x', 'pct_x'),
+            ('Y', 'null_corr_y', 'corr_y', 'p_y', 'pct_y'),
+        ]):
+            ax = axes[row, 2]
+            null = perm_results[key_null]
+            r    = perm_results[key_r]
+            p    = perm_results[key_p]
+            pct  = perm_results[key_pct]
+            ax.hist(null, bins=30, color='slategray', edgecolor='white', alpha=0.8,
+                    label='Null (circular shifts)')
+            ax.axvline(r, color='tomato', lw=2,
+                       label=f'True r = {r:.3f}\np = {p:.4f}\n({pct:.1f}th pct)')
+            ax.set_xlabel(f'Pearson r ({coord})')
+            ax.set_ylabel('Count')
+            ax.set_title(f'Permutation test — {coord}')
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.show()
+    if save_path is not None:
+        import os
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        plt.show()
     return fig
 
 
@@ -422,11 +722,20 @@ def run_kalman_filter(mouse_id: str, session_id: str, experiment: str,
                       base_path: str = "S:\\",
                       bin_size_ms: float = 30.0,
                       test_fraction: float = 0.2,
-                      neural_smooth_sigma: float = 2.0,
-                      pos_smooth_sigma: float = 2.0,
+                      neural_smooth_sigma: float = 0,
+                      pos_smooth_sigma: float = 1.0,
                       x_col: str = 'nose_x',
                       y_col: str = 'nose_y',
-                      cluster_filter: str = None):
+                      cluster_filter: str = None,
+                      n_permutations: int = 1000,
+                      ridge_alpha: float = 10.0,
+                      obs_noise_scale: float = 1.0,
+                      mahal_gate_percentile: float = 0.0,
+                      ar1_alpha: float = None,
+                      use_steady_state_gain: bool = False,
+                      bias_ema_lambda: float = 0.0,
+                      clip_to_bounds: bool = False,
+                      save_plots: bool = False):
     """
     End-to-end Kalman filter position decoding.
 
@@ -458,11 +767,46 @@ def run_kalman_filter(mouse_id: str, session_id: str, experiment: str,
         Filter expression passed to session.filter_clusters()
         e.g. 'best_channel >= 16'.
 
+    n_permutations : int
+        Number of circular-shift permutations for the significance test.
+        Set to 0 to skip.  Default 1000.
+    ridge_alpha : float
+        Ridge regularisation for the observation matrix H.  Larger values
+        shrink H, reducing the Kalman gain and dampening overshoots that
+        result from strong (possibly spurious) neural-position correlations.
+        Default 1.0.
+    mahal_gate_percentile : float
+        If > 0, enables scalar Mahalanobis innovation gating.  For each bin,
+        the squared Mahalanobis distance chi2 = v^T S^{-1} v is compared to
+        the given percentile of the chi2(n_neurons) distribution.  Bins where
+        chi2 exceeds the threshold are population-level outliers (noise bursts,
+        tracking dropouts); their innovations are soft-scaled down so the
+        effective Mahalanobis distance equals the threshold.  This is more
+        principled than per-neuron clipping because it respects the full
+        observation covariance.  Good starting value: 0.99.  Default 0.0 (off).
+    ar1_alpha : float or None
+        AR(1) coefficient for the diagonal state transition A = diag(α_x, α_y).
+        If None (default), α is estimated per-axis from the lag-1
+        autocorrelation of training positions.  Set to a fixed value in (0, 1)
+        to override.
+    use_steady_state_gain : bool
+        If True, solve the DARE during fit() to obtain the steady-state Kalman
+        gain K_inf, and use it as a fixed gain in decode() (no recursive P
+        update).  Eliminates the high-gain startup transient.  Default False.
+    clip_to_bounds : bool
+        If True, clip the decoded state to the arena bounds seen during
+        training after each Kalman update.  Default False.
+    save_plots : bool
+        If True, save the summary figure as a PNG to
+        ``{base_path}/{experiment}/kalman_decode/{mouse_id}/{session_id}/
+        kalman_decode.png`` and suppress the interactive window.
+        Default False (show interactively).
+
     Returns
     -------
     decoder : KalmanFilterDecoder
     metrics : dict
-        r2_x, r2_y, corr_x, corr_y, mean_position_error
+        r2_x, r2_y, corr_x, corr_y, mean_position_error, p_x, p_y
     """
     print("=" * 60)
     print("KALMAN FILTER POSITION DECODING")
@@ -503,11 +847,32 @@ def run_kalman_filter(mouse_id: str, session_id: str, experiment: str,
     print(f"\n{step+2}. Fitting Kalman filter  "
           f"(neural_smooth={neural_smooth_sigma}, pos_smooth={pos_smooth_sigma})")
     decoder = KalmanFilterDecoder(neural_smooth_sigma=neural_smooth_sigma,
-                                  pos_smooth_sigma=pos_smooth_sigma)
+                                  pos_smooth_sigma=pos_smooth_sigma,
+                                  ridge_alpha=ridge_alpha,
+                                  obs_noise_scale=obs_noise_scale,
+                                  mahal_gate_percentile=mahal_gate_percentile,
+                                  ar1_alpha=ar1_alpha,
+                                  use_steady_state_gain=use_steady_state_gain,
+                                  bias_ema_lambda=bias_ema_lambda)
     decoder.fit(X_train, y_train_x, y_train_y)
 
+    # --- Test-set mean subtraction ---
+    # Firing rates can drift over the session (adaptation, behavioural state
+    # changes), so the test-set per-neuron mean may differ from training.
+    # Because H was fit to the training distribution, any DC offset in the
+    # test set produces a non-zero mean innovation at every step, which the
+    # Kalman gain integrates into a systematic position drift.  Removing the
+    # test-set mean before decoding eliminates this bias without affecting the
+    # shape of the decoded trajectory.
+    test_mean = X_test.mean(axis=0)          # (n_neurons,)
+    train_mean = X_train.mean(axis=0)
+    print(f"\n  Test-set neural mean shift from training: "
+          f"max={np.max(np.abs(test_mean - train_mean)):.3f}  "
+          f"median={np.median(np.abs(test_mean - train_mean)):.3f}  (z-score units)")
+    X_test_dec = X_test - test_mean
+
     # --- Linear baseline (diagnostic) ---
-    lin_x, lin_y = decoder.decode_linear(X_test)
+    lin_x, lin_y = decoder.decode_linear(X_test_dec)
     lin_corr_x, _ = pearsonr(y_test_x, lin_x)
     lin_corr_y, _ = pearsonr(y_test_y, lin_y)
     print(f"\nLinear decode baseline (no Kalman smoothing):")
@@ -517,7 +882,7 @@ def run_kalman_filter(mouse_id: str, session_id: str, experiment: str,
 
     # --- Kalman decode ---
     print(f"\n{step+3}. Kalman decoding test set")
-    pred_x, pred_y = decoder.decode(X_test)
+    pred_x, pred_y = decoder.decode(X_test_dec, clip_to_bounds=clip_to_bounds)
 
     # --- Metrics ---
     corr_x, _ = pearsonr(y_test_x, pred_x)
@@ -532,21 +897,64 @@ def run_kalman_filter(mouse_id: str, session_id: str, experiment: str,
     print(f"  Y  r = {corr_y:.4f}   R² = {r2_y:.4f}")
     print(f"  Mean Euclidean error: {mean_err:.1f} px")
 
+    # --- Permutation test ---
+    perm_results = None
+    if n_permutations > 0:
+        print(f"\n{step+4}. Permutation test ({n_permutations} circular shifts)")
+        perm_results = permutation_test(
+            y_test_x, y_test_y, pred_x, pred_y,
+            n_permutations=n_permutations
+        )
+        print(f"  X  r = {perm_results['corr_x']:.4f}   p = {perm_results['p_x']:.4f}"
+              f"   ({perm_results['pct_x']:.1f}th percentile of null)")
+        print(f"  Y  r = {perm_results['corr_y']:.4f}   p = {perm_results['p_y']:.4f}"
+              f"   ({perm_results['pct_y']:.1f}th percentile of null)")
+        print(f"  Euclidean error = {perm_results['true_euclid']:.1f} px   "
+              f"p = {perm_results['p_euclid']:.4f}"
+              f"   ({perm_results['pct_euclid']:.1f}th percentile of null)")
+
     metrics = {
         'corr_x': corr_x, 'corr_y': corr_y,
         'r2_x':   r2_x,   'r2_y':   r2_y,
         'mean_position_error': mean_err,
         'linear_corr_x': lin_corr_x,
         'linear_corr_y': lin_corr_y,
+        'p_x':      perm_results['p_x']      if perm_results else None,
+        'p_y':      perm_results['p_y']      if perm_results else None,
+        'p_euclid': perm_results['p_euclid'] if perm_results else None,
     }
 
+    # --- Save metrics CSV ---
+    if save_plots:
+        import os, csv
+        metrics_dir = os.path.join(
+            base_path, experiment, "kalman_decode", mouse_id, session_id
+        )
+        os.makedirs(metrics_dir, exist_ok=True)
+        metrics_path = os.path.join(metrics_dir, "metrics.csv")
+        with open(metrics_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=metrics.keys())
+            writer.writeheader()
+            writer.writerow(metrics)
+
     # --- Plot ---
-    print(f"\n{step+4}. Plotting results")
+    plot_step = step + 5 if n_permutations > 0 else step + 4
+    save_path = None
+    if save_plots:
+        import os
+        save_path = os.path.join(
+            base_path, experiment, "kalman_decode",
+            mouse_id, session_id, "kalman_decode.png"
+        )
+    print(f"\n{plot_step}. Plotting results"
+          + (f"  → {save_path}" if save_path else ""))
     plot_results(
         y_test_x, y_test_y, pred_x, pred_y,
         time_test / 1000.0,          # ms → s
         corr_x, corr_y, r2_x, r2_y, mean_err,
-        mouse_id, session_id
+        mouse_id, session_id,
+        perm_results=perm_results,
+        save_path=save_path,
     )
 
     print("\n" + "=" * 60)
@@ -563,13 +971,22 @@ def run_kalman_filter(mouse_id: str, session_id: str, experiment: str,
 if __name__ == "__main__":
     run_kalman_filter(
         mouse_id="7012",
-        session_id="m10",
+        session_id="m5",
         experiment="clickbait-motivate",
         base_path="d:/data/",
-        bin_size_ms=30.0,       # 30 ms ≈ video frame rate
+        bin_size_ms=30.0,         # 30 ms ≈ video frame rate
         test_fraction=0.2,
-        neural_smooth_sigma=1.0,  # Smooth neural activity over ~2 bins (60 ms)
-        pos_smooth_sigma=1.0,     # Smooth position labels to reduce SLEAP jitter
+        neural_smooth_sigma=0.0,  # Smooth neural activity over ~2 bins (60 ms)
+        pos_smooth_sigma=0.0,     # Smooth position labels to reduce SLEAP jitter
         x_col='bonsai_centroid_x',
         y_col='bonsai_centroid_y',
+        n_permutations=1000,      # Circular-shift permutation test
+        ridge_alpha=1.0,            # Ridge regularisation for H; increase to dampen overshoots
+        obs_noise_scale=1.0,        # Multiplier for Q; >1 reduces Kalman gain
+        mahal_gate_percentile=0.99, # Mahalanobis gate: soft-scale outlier bins to this chi2 percentile
+        ar1_alpha=None,             # AR(1) α; None = estimate from lag-1 autocorrelation
+        use_steady_state_gain=True, # DARE steady-state gain: eliminates startup transient
+        bias_ema_lambda=0.995,       # Innovation EMA bias correction; τ ≈ 1/(1-λ) bins
+        clip_to_bounds=True,       # Clip decoded state to training arena bounds
+        cluster_filter='best_channel <= 32'    # Only use neurons from given channels
     )

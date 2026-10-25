@@ -55,9 +55,16 @@ class SessionData:
     
     def __init__(self, mouse_id: str, session_id: str, experiment: str, base_path: str = "S:\\",
                  sampling_rate: float = 30000.0, min_spikes: int = 250,
-                 exclude_noise: bool = True, verbose: bool = True):
+                 exclude_noise: bool = True, verbose: bool = True, region: Optional[str] = None):
         """
         Initialize SessionData object by loading preprocessed neural data.
+
+        Files are looked up in the standard layout under <base_path>/<experiment>/ first:
+            kilosorted/<mouse>/<session>/ or <region>-ks/<mouse>/<session>/   Kilosort/phy output
+            events/<mouse>/<session>/events.csv  (then events_temp/)          ephys-aligned events
+            preprocessed/<mouse>/<session>/sniff.npy                          sniff signal
+            bonsai/<mouse>/<session>/*<mouse>_<session>.avi                   video
+        and only searched for anywhere under the experiment folder when missing there.
 
         Parameters:
         -----------
@@ -67,6 +74,9 @@ class SessionData:
             Session identifier (e.g., 'v1')
         base_path : str
             Base directory path for preprocessed data files
+        region : str, optional
+            Brain region whose Kilosort output to load ('hc' or 'ob'), for experiments that keep
+            each region in its own <region>-ks/ folder (the cbm experiments). Required there.
         sampling_rate : float
             Neural data sampling rate in Hz
         min_spikes : int
@@ -76,16 +86,17 @@ class SessionData:
         verbose : bool
             Whether to print loading information
         """
-        self.mouse_id = mouse_id
+        self.mouse_id = str(mouse_id)
         self.session_id = session_id
         self.experiment = experiment
         self.base_path = base_path
-        self.video_path = get_file_paths(f"{base_path}/{experiment}", 'avi', f"{mouse_id}_{session_id}", session_type='', print_paths=False, verbose=False)[0]
-        self.video = cv2.VideoCapture()
+        self.region = region
         self.sampling_rate = sampling_rate
         self.min_spikes = min_spikes
         self.exclude_noise = exclude_noise
         self.verbose = verbose
+        self.video_path = self._find_video()
+        self.video = cv2.VideoCapture()
 
         # Initialize containers
         self.clusters = {}
@@ -111,7 +122,12 @@ class SessionData:
         self._process_signals()
         self.find_sniff_peaks(prominence=1000, distance=50)
 
-        if 'nose.x' in self.events:
+        # SLEAP nose when there is one (newer sessions name it nose_x, older ones nose.x),
+        # else Bonsai's online tracking (which also follows the nose)
+        if 'nose_x' in self.events:
+            self.position_x = 'nose_x'
+            self.position_y = 'nose_y'
+        elif 'nose.x' in self.events:
             self.position_x = 'nose.x'
             self.position_y = 'nose.y'
         else:
@@ -140,31 +156,75 @@ class SessionData:
         file_path : Path or None
             Path to the target file, or None if not found
         """
-        # Search from experiment directory
         search_dir = Path(self.base_path) / self.experiment
-        
+
         if not search_dir.exists():
             if self.verbose:
                 print(f"Experiment directory does not exist: {search_dir}")
             return None
-        
-        # Search for the target file within the experiment directory
-        search_pattern = f"**/{target_filename}"
-        matching_files = list(search_dir.glob(search_pattern))
-        
-        # Filter for files that have mouse_id/session_id in their path
-        # Use Path.parts to avoid OS-specific separator issues
-        for file_path in matching_files:
-            path_parts = file_path.parts
-            # Check if both mouse_id and session_id appear in the path parts
-            if self.mouse_id in path_parts and self.session_id in path_parts:
-                return file_path
-        
+
+        # The standard layout first: no search needed
+        for folder in self._standard_dirs(target_filename):
+            if (folder / target_filename).exists():
+                return folder / target_filename
+
+        # Otherwise search the whole experiment directory for a file with mouse_id and session_id in
+        # its path (slow on big trees)
+        matching_files = [f for f in search_dir.glob(f"**/{target_filename}")
+                          if self.mouse_id in f.parts and self.session_id in f.parts]
+        if target_filename in self._KILOSORT_FILES:
+            if self.region is not None:
+                matching_files = [f for f in matching_files if f"{self.region}-ks" in f.parts]
+            elif any(f.parent.parent.parent.name.endswith('-ks') for f in matching_files):
+                raise ValueError(f"{self.experiment} keeps each region's Kilosort output in its own <region>-ks "
+                                 f"folder; pass region (e.g. region='hc') to choose one")
+        if target_filename == 'events.csv':
+            # bonsai/<mouse>/<session>/events.csv is the copy before alignment to the ephys clock
+            matching_files.sort(key=lambda f: 'bonsai' in f.parts)
+        if matching_files:
+            return matching_files[0]
+
         if self.verbose:
             print(f"Warning: {target_filename} not found for {self.mouse_id}/{self.session_id} in {search_dir}")
         return None
-    
+
+    _KILOSORT_FILES = ('spike_times.npy', 'spike_clusters.npy', 'spike_templates.npy', 'templates.npy',
+                       'amplitudes.npy', 'whitening_mat_inv.npy', 'cluster_group.tsv', 'cluster_KSLabel.tsv')
+
+    def _standard_dirs(self, target_filename: str) -> List[Path]:
+        """Folders where the standard layout keeps a file, in the order to try them."""
+        exp = Path(self.base_path) / self.experiment
+        m, s = self.mouse_id, self.session_id
+        if target_filename in self._KILOSORT_FILES:
+            if self.region is not None:
+                return [exp / f"{self.region}-ks" / m / s]
+            if any((exp / f"{r}-ks").is_dir() for r in ('hc', 'ob')):
+                raise ValueError(f"{self.experiment} keeps each region's Kilosort output in its own <region>-ks "
+                                 f"folder; pass region (e.g. region='hc') to choose one")
+            return [exp / 'kilosorted' / m / s]
+        if target_filename == 'events.csv':
+            return [exp / 'events' / m / s, exp / 'events_temp' / m / s]
+        return [exp / 'preprocessed' / m / s]
+
+    def _find_video(self) -> Optional[Path]:
+        """The session video: bonsai/<mouse>/<session>/*<mouse>_<session>.avi, else searched for. None if missing."""
+        bonsai_dir = Path(self.base_path) / self.experiment / 'bonsai' / self.mouse_id / self.session_id
+        videos = sorted(bonsai_dir.glob(f"*{self.mouse_id}_{self.session_id}.avi"))
+        if not videos:
+            videos = get_file_paths(f"{self.base_path}/{self.experiment}", 'avi', f"{self.mouse_id}_{self.session_id}",
+                                    session_type='', print_paths=False, verbose=False)
+        if not videos:
+            if self.verbose:
+                print(f"Warning: no video found for {self.mouse_id}_{self.session_id}")
+            return None
+        return videos[0]
+
     def _load_video(self):
+        if self.video_path is None:
+            self.fps = np.nan
+            self.width = self.height = self.total_frames = 0
+            self.video_offset = 0
+            return
         # Load video
         self.video = cv2.VideoCapture(f"{self.video_path}")
 
@@ -188,7 +248,7 @@ class SessionData:
                 self.session_id,
                 self.experiment, 
                 base_path=self.base_path,
-                files_needed=['spike_times', 'spike_templates', 'templates', 'sniff']
+                files_needed=['spike_times', 'spike_clusters', 'spike_templates', 'templates', 'sniff']
             )
             
             if self.verbose:
@@ -232,7 +292,8 @@ class SessionData:
         # Define filename mapping
         target_files = {
             'spike_times': 'spike_times.npy',
-            'spike_templates': 'spike_templates.npy', 
+            'spike_clusters': 'spike_clusters.npy',
+            'spike_templates': 'spike_templates.npy',
             'templates': 'templates.npy',
             'amplitudes': 'amplitudes.npy',
             'whitening_mat_inv': 'whitening_mat_inv.npy',
@@ -292,7 +353,17 @@ class SessionData:
         This file contains cluster quality labels (good, mua, noise).
         Looks for label column with header 'group' first, then 'KSLabel' as fallback.
         Cluster ID is always assumed to be in the first column.
+
+        Kilosort's automatic labels in cluster_KSLabel.tsv, when present, are read first: once a
+        session is curated in phy, cluster_group.tsv lists only the clusters someone reviewed, and
+        the rest keep their KSLabel instead of becoming 'unknown'.
         """
+        ks_label_path = self._get_file_path("cluster_KSLabel.tsv")
+        if ks_label_path is not None:
+            ks_labels = pd.read_csv(ks_label_path, sep='\t')
+            self.cluster_labels.update(dict(zip(ks_labels['cluster_id'].astype(int),
+                                                ks_labels['KSLabel'].astype(str))))
+
         cluster_group_path = self._get_file_path("cluster_group.tsv")
 
         if cluster_group_path is None:
@@ -398,11 +469,18 @@ class SessionData:
     
     def _process_clusters(self):
         """Process clusters and extract relevant information."""
-        if 'spike_times' not in self.raw_data or 'spike_templates' not in self.raw_data:
+        if 'spike_times' not in self.raw_data or not ({'spike_clusters', 'spike_templates'} & set(self.raw_data)):
             raise ValueError("Missing required spike data")
 
-        spike_times = self.raw_data['spike_times']
-        spike_templates = self.raw_data['spike_templates']
+        spike_times = self.raw_data['spike_times'].ravel()
+        # spike_clusters.npy holds each spike's cluster after phy curation (merges and splits);
+        # spike_templates.npy only Kilosort's original template, so it is the fallback
+        if 'spike_clusters' in self.raw_data:
+            spike_templates = self.raw_data['spike_clusters'].ravel()
+        else:
+            spike_templates = self.raw_data['spike_templates'].ravel()
+            if self.verbose:
+                print("Warning: spike_clusters.npy not found; assigning spikes by Kilosort template")
         templates = self.raw_data.get('templates')
 
         # Get unique cluster IDs
@@ -447,6 +525,7 @@ class SessionData:
             # Store cluster information with original cluster_id and label
             cluster_info = {
                 'cluster_id': int(cluster_id),  # Original cluster ID from Kilosort
+                'region': self.region,  # Brain region ('hc', 'ob') or None
                 'label': label,  # Cluster quality label (good, mua, noise, unknown)
                 'best_channel': best_channel,
                 'spike_times': cluster_spike_times,

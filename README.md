@@ -65,6 +65,19 @@ session = SessionData(
 print(f"Loaded {session.n_clusters} clusters")
 ```
 
+Files are found in the standard layout under `<base_path>/<experiment>/` first (`kilosorted/` or
+`<region>-ks/`, `events/`, `preprocessed/`, `bonsai/` folders of `<mouse>/<session>/`) and only searched
+for elsewhere when missing. Spikes are assigned to clusters by `spike_clusters.npy`, so phy merges and
+splits count; labels are Kilosort's `cluster_KSLabel.tsv` overridden by phy's `cluster_group.tsv`.
+
+Experiments that keep each brain region's Kilosort output in its own folder (the cbm experiments:
+`hc-ks/`, `ob-ks/`) need the region:
+
+```python
+hc = SessionData("9005", "x5", "cbm-odor", base_path="E:/", region="hc")
+ob = SessionData("9005", "x5", "cbm-odor", base_path="E:/", region="ob")
+```
+
 ### Creating Population Activity Matrices
 
 ```python
